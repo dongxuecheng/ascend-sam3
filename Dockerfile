@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # SAM3 FastAPI 推理服务镜像
-# 基础镜像已包含 CANN 8.2.RC1 + Python 3.11 + Ascend310P 驱动支持
+# 基础镜像已包含 CANN + Python 3.11 + Ascend310P 驱动支持
 #
 # 建议启用 BuildKit 以使用缓存挂载，显著减少重复构建时间：
 #   DOCKER_BUILDKIT=1 docker build -t sam3:latest .
@@ -9,7 +9,8 @@
 #   TOKENIZERS_GIT_REPOSITORY: tokenizers-cpp 仓库地址
 #   ABSEIL_GIT_REPOSITORY:     abseil-cpp 仓库地址
 
-FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.2.rc1-310p-ubuntu22.04-py3.11 AS builder
+# FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.2.rc1-310p-ubuntu22.04-py3.11 AS builder
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-310p-ubuntu22.04-py3.11 AS builder
 
 ARG TOKENIZERS_GIT_REPOSITORY=https://github.com/mlc-ai/tokenizers-cpp.git
 ARG ABSEIL_GIT_REPOSITORY=https://github.com/abseil/abseil-cpp.git
@@ -63,7 +64,12 @@ RUN --mount=type=cache,target=/app/build \
     --mount=type=cache,target=/root/.cargo/git \
     mkdir -p /app/build && cd /app/build && \
     PYBIND11_DIR=$(python3 -m pybind11 --cmakedir) && \
+    PYTHON_BIN_DIR=$(python3 -c "import sys, os; print(os.path.dirname(sys.executable))") && \
+    export PATH="${PYTHON_BIN_DIR}:${PATH}" && \
     cmake -Dpybind11_DIR=$PYBIND11_DIR \
+          -DPYTHON_EXECUTABLE=$(which python3) \
+          -DPython_EXECUTABLE=$(which python3) \
+          -DPYBIND11_FINDPYTHON=ON \
           -DTOKENIZERS_GIT_REPOSITORY=$TOKENIZERS_GIT_REPOSITORY \
           -DABSEIL_GIT_REPOSITORY=$ABSEIL_GIT_REPOSITORY \
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
@@ -73,12 +79,13 @@ RUN --mount=type=cache,target=/app/build \
 
 # ------------------------------------------------------------------------------
 # 运行阶段：只保留 Python 服务依赖和编译好的 .so，镜像更小
-FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.2.rc1-310p-ubuntu22.04-py3.11 AS runtime
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-310p-ubuntu22.04-py3.11 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest \
     LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:\
 /usr/local/Ascend/ascend-toolkit/latest/lib64/plugin/opskernel:\
+/usr/local/Ascend/ascend-toolkit/latest/opp/built-in/op_impl/ai_core/tbe/op_api/lib/linux/aarch64:\
 /usr/local/Ascend/driver/lib64:\
 /usr/local/Ascend/driver/lib64/common:\
 /usr/local/Ascend/driver/lib64/driver:\
@@ -95,7 +102,7 @@ RUN pip3 config set global.index-url https://mirrors.ustc.edu.cn/pypi/web/simple
 
 WORKDIR /app
 COPY service/requirements.txt /app/service/requirements.txt
-RUN pip3 install --no-cache-dir -r /app/service/requirements.txt
+RUN pip3 install -r /app/service/requirements.txt
 RUN pip3 install opencv-python-headless -i https://pypi.tuna.tsinghua.edu.cn/simple
 COPY service /app/service
 COPY --from=builder /app/ascendsam3*.so /app/

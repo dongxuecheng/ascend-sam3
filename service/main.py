@@ -21,8 +21,12 @@ import os
 import time
 from typing import List, Optional
 
+import cv2
+import numpy as np
+
 from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 # 尝试导入 pybind11 模块；如果 build/ 下没有，则尝试 PYTHONPATH 中已安装的版本
@@ -35,6 +39,16 @@ if BUILD_DIR not in sys.path:
 import ascendsam3
 
 app = FastAPI(title="SAM3 Ascend Inference Service", version="1.1.0")
+
+# 挂载静态文件目录，前端页面放在 service/static/
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/")
+def root():
+    """返回前端页面"""
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 # 模型与资源路径，可通过环境变量覆盖
 VISION_MODEL = os.getenv("VISION_MODEL", "models/om-models/vision-encoder-tuned-2.om")
@@ -71,6 +85,24 @@ def _load_model() -> ascendsam3.Sam3Model:
     return _model
 
 
+def _png_to_rle(png_bytes: bytes) -> tuple:
+    """将 PNG 字节解码为 RLE，返回 (RLE, width, height)
+
+    注意：C++ 后端返回的 mask 已经是基于当前检测框的，因此这里直接编码全图，
+    前端绘制时放在 box 左上角即可。
+    """
+    arr = np.frombuffer(png_bytes, dtype=np.uint8)
+    mask = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise ValueError("Failed to decode PNG mask")
+    binary = (mask > 0).astype(np.uint8)
+    flat = np.concatenate([[0], binary.ravel(), [0]])
+    runs = np.where(flat[1:] != flat[:-1])[0] + 1
+    runs[1::2] -= runs[0::2]
+    h, w = binary.shape
+    return runs.tolist(), w, h
+
+
 def _decode_base64_image(b64: str) -> bytes:
     """解码 base64 图片，支持 data URL"""
     if "," in b64:
@@ -104,14 +136,19 @@ def _detect(image_bytes: bytes, class_names: List[str], confidence: float, retur
             "score": r["score"],
             "box": box_list,           # 使用适配好的列表格式
         }
-        
+
         if return_mask and "mask_png" in r:
             try:
-                # 使用 OpenCV 解码 PNG 并完成 RLE 编码
-                item["mask"] = _png_to_rle(r["mask_png"])
+                # C++ 后端返回的 mask 已是 box 相对，直接转 RLE
+                rle, mw, mh = _png_to_rle(r["mask_png"])
+                item["mask"] = rle
+                item["mask_width"] = mw
+                item["mask_height"] = mh
             except Exception:
-                # 容错处理：当解码失败时，设为 None
+                # 容错处理：当编解码失败时，设为 None
                 item["mask"] = None
+                item["mask_width"] = 0
+                item["mask_height"] = 0
         results.append(item)
 
     return {
@@ -148,8 +185,13 @@ def detect_file(
     """
     try:
         image_bytes = image.file.read()
-        names = class_names[0].split(',') if class_names else []
+        # 同时支持多个 class_names 表单字段，以及单个逗号分隔字段
+        if len(class_names) == 1 and ',' in class_names[0]:
+            names = [n.strip() for n in class_names[0].split(',') if n.strip()]
+        else:
+            names = [n.strip() for n in class_names if n.strip()]
         
+        print(f"[DEBUG] received class_names={class_names}, parsed names={names}")
         result = _detect(image_bytes, names, confidence, return_mask)
         return result
     except Exception as e:

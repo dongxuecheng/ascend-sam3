@@ -21,6 +21,7 @@ include_directories(
 link_directories(
     ${ASCEND_HOME}/lib64
     ${ASCEND_HOME}/lib64/plugin/opskernel
+    ${ASCEND_HOME}/opp/built-in/op_impl/ai_core/tbe/op_api/lib/linux/aarch64
 )
 
 # OpenCV：必须通过环境变量 OPENCV_INSTALL_DIR 指定，不硬编码默认值
@@ -120,14 +121,33 @@ else()
 endif()
 list(APPEND EXTRA_LIBS tokenizers_cpp)
 
+# 不同 CANN 版本运行时库与 aclnn 库名称不同，按需查找
+# CANN 8.x：runtime / aclnn_ops_infer / aclnn_math
+# CANN 9.x：acl_rt / opapi
+find_library(CANN_ACLRT_LIB NAMES runtime acl_rt PATHS ${ASCEND_HOME}/lib64 NO_DEFAULT_PATH)
+find_library(CANN_ACLNN_INFER_LIB NAMES aclnn_ops_infer PATHS ${ASCEND_HOME}/lib64 NO_DEFAULT_PATH)
+find_library(CANN_ACLNN_MATH_LIB NAMES aclnn_math PATHS ${ASCEND_HOME}/lib64 NO_DEFAULT_PATH)
+find_library(CANN_OPAPI_LIB NAMES opapi PATHS ${ASCEND_HOME}/opp/built-in/op_impl/ai_core/tbe/op_api/lib/linux/aarch64 NO_DEFAULT_PATH)
+
+set(CANN_LIBS ascendcl acl_op_compiler nnopbase)
+if(CANN_ACLRT_LIB)
+    list(APPEND CANN_LIBS ${CANN_ACLRT_LIB})
+else()
+    message(FATAL_ERROR "Cannot find CANN runtime library (runtime or acl_rt) under ${ASCEND_HOME}/lib64")
+endif()
+if(CANN_ACLNN_INFER_LIB)
+    list(APPEND CANN_LIBS ${CANN_ACLNN_INFER_LIB})
+endif()
+if(CANN_ACLNN_MATH_LIB)
+    list(APPEND CANN_LIBS ${CANN_ACLNN_MATH_LIB})
+endif()
+if(CANN_OPAPI_LIB)
+    list(APPEND CANN_LIBS ${CANN_OPAPI_LIB})
+endif()
+
 # 静态库循环依赖时使用 start-group/end-group
 target_link_libraries(ascendsam3
-    ascendcl
-    runtime
-    acl_op_compiler
-    nnopbase
-    aclnn_ops_infer
-    aclnn_math
+    ${CANN_LIBS}
     -Wl,--start-group
     ${OpenCV_LIBS}
     ${OPENCV_3RDPARTY_LIBS}
@@ -148,6 +168,14 @@ add_executable(ascendsam3_bench src/bench.cpp)
 target_link_libraries(ascendsam3_bench ascendsam3)
 
 # pybind11 Python 绑定
+# 帮助 pybind11 定位当前 Python 解释器，避免多版本/自定义安装路径导致检测失败
+if(NOT DEFINED PYTHON_EXECUTABLE)
+    find_package(Python COMPONENTS Interpreter QUIET)
+    if(Python_Interpreter_FOUND)
+        set(PYTHON_EXECUTABLE ${Python_EXECUTABLE} CACHE FILEPATH "Python interpreter")
+    endif()
+endif()
+
 # 优先使用本地已安装的 pybind11（例如 pip install pybind11），找不到再回退到 FetchContent
 find_package(pybind11 QUIET)
 if(NOT pybind11_FOUND)
@@ -165,12 +193,7 @@ pybind11_add_module(ascendsam3_py src/python/bindings.cpp)
 set_target_properties(ascendsam3_py PROPERTIES OUTPUT_NAME ascendsam3 LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 target_link_libraries(ascendsam3_py PRIVATE
     ascendsam3
-    ascendcl
-    runtime
-    acl_op_compiler
-    nnopbase
-    aclnn_ops_infer
-    aclnn_math
+    ${CANN_LIBS}
     -Wl,--start-group
     ${OpenCV_LIBS}
     ${OPENCV_3RDPARTY_LIBS}

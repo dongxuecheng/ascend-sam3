@@ -514,7 +514,8 @@ object::DetectionBoxArray Sam3Infer::postprocess(const cv::Mat& original_image,
             }
             else
             {
-                // CPU 回退路径
+                // CPU 回退路径：先对 float mask 做插值放大，再阈值二值化，
+                // 比“先二值化再放大”能显著减少锯齿。
                 std::vector<float> mask_raw(MASK_SIZE * MASK_SIZE);
                 CHECK_ACL(aclrtMemcpy(mask_raw.data(), mask_bytes,
                                       static_cast<char*>(pred_masks_buf) + idx * mask_bytes,
@@ -522,10 +523,11 @@ object::DetectionBoxArray Sam3Infer::postprocess(const cv::Mat& original_image,
                                       ACL_MEMCPY_DEVICE_TO_HOST));
 
                 cv::Mat mask_mat(MASK_SIZE, MASK_SIZE, CV_32FC1, mask_raw.data());
+                cv::Mat resized_float;
+                cv::resize(mask_mat, resized_float, cv::Size(orig_w, orig_h), 0, 0, cv::INTER_LINEAR);
                 cv::Mat binary_mask;
-                cv::threshold(mask_mat, binary_mask, 0.0f, 255.0f, cv::THRESH_BINARY);
-                binary_mask.convertTo(binary_mask, CV_8UC1);
-                cv::resize(binary_mask, resized_mask, cv::Size(orig_w, orig_h), 0, 0, cv::INTER_LINEAR);
+                cv::threshold(resized_float, binary_mask, 0.0f, 255.0f, cv::THRESH_BINARY);
+                binary_mask.convertTo(resized_mask, CV_8UC1);
                 have_mask = true;
             }
 

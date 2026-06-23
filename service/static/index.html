@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAM3 Ascend 检测演示</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            margin: 0;
+            background: #f5f7fa;
+            color: #333;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 24px;
+            color: #1a1a1a;
+        }
+        .main-grid {
+            display: grid;
+            grid-template-columns: 360px 1fr;
+            gap: 20px;
+        }
+        @media (max-width: 900px) {
+            .main-grid { grid-template-columns: 1fr; }
+        }
+        .panel {
+            background: #fff;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        .form-group {
+            margin-bottom: 18px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            font-size: 14px;
+        }
+        input[type="text"], input[type="range"], input[type="file"], select, textarea {
+            width: 100%;
+            padding: 8px 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        input[type="range"] { padding: 0; }
+        .range-value {
+            text-align: right;
+            font-size: 13px;
+            color: #666;
+            margin-top: 4px;
+        }
+        .checkbox-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+        .checkbox-row input { width: auto; }
+        .checkbox-row label { margin: 0; font-weight: normal; }
+        button {
+            width: 100%;
+            padding: 12px;
+            background: #2563eb;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { background: #1d4ed8; }
+        button:disabled { background: #93c5fd; cursor: not-allowed; }
+        button.secondary {
+            background: #fff;
+            color: #2563eb;
+            border: 1px solid #2563eb;
+        }
+        button.secondary:hover { background: #eff6ff; }
+        .drop-zone {
+            border: 2px dashed #cbd5e1;
+            border-radius: 10px;
+            padding: 30px 20px;
+            text-align: center;
+            color: #64748b;
+            cursor: pointer;
+            transition: border-color 0.2s, background 0.2s;
+        }
+        .drop-zone:hover, .drop-zone.dragover {
+            border-color: #2563eb;
+            background: #eff6ff;
+        }
+        .preview-image {
+            margin-top: 12px;
+            max-width: 100%;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+            display: none;
+        }
+        .image-wrapper {
+            position: relative;
+            display: inline-block;
+            max-width: 100%;
+            margin-top: 16px;
+        }
+        .image-wrapper img, .image-wrapper canvas {
+            max-width: 100%;
+            border-radius: 8px;
+            display: block;
+        }
+        .image-wrapper canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        .result-actions {
+            margin-top: 12px;
+            display: flex;
+            gap: 10px;
+        }
+        .result-actions button { flex: 1; }
+        .json-panel {
+            margin-top: 20px;
+        }
+        .json-panel textarea {
+            width: 100%;
+            min-height: 200px;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 12px;
+            resize: vertical;
+        }
+        .stats {
+            margin-top: 12px;
+            font-size: 13px;
+            color: #666;
+        }
+        .legend {
+            margin-top: 12px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            padding: 4px 8px;
+            background: #f1f5f9;
+            border-radius: 6px;
+        }
+        .legend-color {
+            width: 14px;
+            height: 14px;
+            border-radius: 3px;
+            border: 1px solid rgba(0,0,0,0.1);
+        }
+        .tag-input {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            padding: 6px 8px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            min-height: 40px;
+            align-items: center;
+        }
+        .tag-input input {
+            border: none;
+            outline: none;
+            flex: 1;
+            min-width: 80px;
+            padding: 4px;
+            font-size: 14px;
+        }
+        .tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            background: #e0e7ff;
+            color: #3730a3;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+        .tag button {
+            width: auto;
+            padding: 0;
+            background: transparent;
+            color: #3730a3;
+            border: none;
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .toast {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 12px 18px;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 14px;
+            z-index: 1000;
+            display: none;
+        }
+        .toast.error { background: #ef4444; }
+        .toast.success { background: #22c55e; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🖼️ SAM3 Ascend 目标检测与分割</h1>
+        <div class="main-grid">
+            <div class="panel">
+                <h3>参数设置</h3>
+                <div class="form-group">
+                    <label>选择图片</label>
+                    <div class="drop-zone" id="dropZone">
+                        点击选择或拖拽图片到此处
+                        <input type="file" id="imageInput" accept="image/*" style="display:none">
+                    </div>
+                    <img id="previewImage" class="preview-image" alt="预览">
+                </div>
+                <div class="form-group">
+                    <label>识别标签（按 Enter 添加）</label>
+                    <div class="tag-input" id="tagInput">
+                        <div id="tagList"></div>
+                        <input type="text" id="tagAdd" placeholder="输入标签后回车">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="confidence">置信度阈值</label>
+                    <input type="range" id="confidence" min="0" max="1" step="0.01" value="0.3">
+                    <div class="range-value" id="confidenceValue">0.30</div>
+                </div>
+                <div class="form-group">
+                    <label>显示选项</label>
+                    <div class="checkbox-row">
+                        <input type="checkbox" id="showBoxes" checked>
+                        <label for="showBoxes">显示检测框</label>
+                    </div>
+                    <div class="checkbox-row">
+                        <input type="checkbox" id="showMasks" checked>
+                        <label for="showMasks">显示分割 Mask</label>
+                    </div>
+                    <div class="checkbox-row">
+                        <input type="checkbox" id="showLabels" checked>
+                        <label for="showLabels">显示标签文字</label>
+                    </div>
+                    <div class="checkbox-row">
+                        <input type="checkbox" id="returnMask" checked>
+                        <label for="returnMask">后端返回 Mask</label>
+                    </div>
+                </div>
+                <button id="submitBtn">开始检测</button>
+                <div class="stats" id="stats"></div>
+            </div>
+
+            <div class="panel">
+                <h3>检测结果</h3>
+                <div id="resultContainer" style="display:none">
+                    <div class="image-wrapper" id="imageWrapper">
+                        <img id="sourceImage" alt="source">
+                        <canvas id="overlayCanvas"></canvas>
+                    </div>
+                    <div class="legend" id="legend"></div>
+                    <div class="result-actions">
+                        <button id="downloadBtn" class="secondary">下载结果图</button>
+                    </div>
+                </div>
+                <div id="placeholder" style="text-align:center;color:#94a3b8;padding:60px 0">
+                    上传图片并点击“开始检测”查看结果
+                </div>
+                <div id="filterPanel" class="form-group" style="display:none">
+                    <label>按标签筛选结果</label>
+                    <div id="filterList"></div>
+                    <div class="result-actions" style="margin-top:8px">
+                        <button type="button" id="selectAllBtn" class="secondary">全选</button>
+                        <button type="button" id="selectNoneBtn" class="secondary">全不选</button>
+                    </div>
+                </div>
+                <div class="json-panel">
+                    <label>JSON 结果</label>
+                    <textarea id="jsonOutput" readonly placeholder="检测结果 JSON 将显示在这里"></textarea>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="toast" id="toast"></div>
+
+    <script>
+        const dropZone = document.getElementById('dropZone');
+        const imageInput = document.getElementById('imageInput');
+        const previewImage = document.getElementById('previewImage');
+        const confidenceInput = document.getElementById('confidence');
+        const confidenceValue = document.getElementById('confidenceValue');
+        const submitBtn = document.getElementById('submitBtn');
+        const sourceImage = document.getElementById('sourceImage');
+        const overlayCanvas = document.getElementById('overlayCanvas');
+        const imageWrapper = document.getElementById('imageWrapper');
+        const resultContainer = document.getElementById('resultContainer');
+        const placeholder = document.getElementById('placeholder');
+        const jsonOutput = document.getElementById('jsonOutput');
+        const stats = document.getElementById('stats');
+        const legend = document.getElementById('legend');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const toast = document.getElementById('toast');
+        const tagList = document.getElementById('tagList');
+        const tagAdd = document.getElementById('tagAdd');
+        const showBoxes = document.getElementById('showBoxes');
+        const showMasks = document.getElementById('showMasks');
+        const showLabels = document.getElementById('showLabels');
+        const filterPanel = document.getElementById('filterPanel');
+        const filterList = document.getElementById('filterList');
+        const selectAllBtn = document.getElementById('selectAllBtn');
+        const selectNoneBtn = document.getElementById('selectNoneBtn');
+
+        let currentFile = null;
+        let lastResults = [];
+        let lastResultImage = null;
+        let activeLabels = new Set();
+
+        const colors = [
+            '#ef4444', '#22c55e', '#3b82f6', '#f59e0b', '#a855f7',
+            '#06b6d4', '#f97316', '#ec4899', '#84cc16', '#6366f1'
+        ];
+
+        let tags = ['person'];
+
+        function getColor(index) {
+            return colors[index % colors.length];
+        }
+
+        function showToast(message, type = 'success') {
+            toast.textContent = message;
+            toast.className = 'toast ' + type;
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 3000);
+        }
+
+        function renderTags() {
+            tagList.innerHTML = '';
+            tags.forEach((tag, idx) => {
+                const div = document.createElement('div');
+                div.className = 'tag';
+                div.innerHTML = `<span>${tag}</span><button type="button" data-idx="${idx}">&times;</button>`;
+                tagList.appendChild(div);
+            });
+            tagList.querySelectorAll('button').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    tags.splice(parseInt(btn.dataset.idx), 1);
+                    renderTags();
+                });
+            });
+        }
+
+        tagAdd.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                const val = tagAdd.value.trim();
+                if (val && !tags.includes(val)) {
+                    tags.push(val);
+                    renderTags();
+                }
+                tagAdd.value = '';
+            }
+        });
+
+        renderTags();
+
+        function handleFile(file) {
+            if (!file) return;
+            currentFile = file;
+            dropZone.textContent = '已选择：' + file.name;
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                previewImage.src = e.target.result;
+                previewImage.style.display = 'block';
+            };
+            reader.readAsDataURL(file);
+        }
+
+        dropZone.addEventListener('click', () => imageInput.click());
+        imageInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+        });
+
+        confidenceInput.addEventListener('input', () => {
+            confidenceValue.textContent = parseFloat(confidenceInput.value).toFixed(2);
+        });
+
+        [showBoxes, showMasks, showLabels].forEach(el => {
+            el.addEventListener('change', () => {
+                if (currentFile && lastResults.length > 0) {
+                    renderResult(currentFile, lastResults);
+                }
+            });
+        });
+
+        function renderFilterPanel(results) {
+            const labels = [...new Set(results.map(r => r.label))];
+            activeLabels = new Set(labels);
+            if (labels.length <= 1) {
+                filterPanel.style.display = 'none';
+                return;
+            }
+            filterPanel.style.display = 'block';
+            filterList.innerHTML = '';
+            labels.forEach((label, idx) => {
+                const row = document.createElement('div');
+                row.className = 'checkbox-row';
+                const id = 'filter-' + idx;
+                row.innerHTML = `
+                    <input type="checkbox" id="${id}" value="${label}" checked>
+                    <label for="${id}" style="margin:0">${label}</label>
+                `;
+                filterList.appendChild(row);
+            });
+            filterList.querySelectorAll('input').forEach(cb => {
+                cb.addEventListener('change', () => {
+                    if (cb.checked) {
+                        activeLabels.add(cb.value);
+                    } else {
+                        activeLabels.delete(cb.value);
+                    }
+                    if (currentFile) renderResult(currentFile, lastResults);
+                });
+            });
+        }
+
+        selectAllBtn.addEventListener('click', () => {
+            filterList.querySelectorAll('input').forEach(cb => {
+                cb.checked = true;
+                activeLabels.add(cb.value);
+            });
+            if (currentFile) renderResult(currentFile, lastResults);
+        });
+
+        selectNoneBtn.addEventListener('click', () => {
+            filterList.querySelectorAll('input').forEach(cb => {
+                cb.checked = false;
+                activeLabels.delete(cb.value);
+            });
+            if (currentFile) renderResult(currentFile, lastResults);
+        });
+
+        submitBtn.addEventListener('click', async () => {
+            if (!currentFile) {
+                showToast('请先选择图片', 'error');
+                return;
+            }
+            if (tags.length === 0) {
+                showToast('请至少保留一个识别标签', 'error');
+                return;
+            }
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = '检测中...';
+            stats.textContent = '';
+
+            const formData = new FormData();
+            formData.append('image', currentFile);
+            tags.forEach(name => formData.append('class_names', name));
+            formData.append('confidence', confidenceInput.value);
+            formData.append('return_mask', document.getElementById('returnMask').checked);
+
+            try {
+                const response = await fetch('/predict/file', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+
+                if (!response.ok || data.error) {
+                    throw new Error(data.error || '请求失败');
+                }
+
+                jsonOutput.value = JSON.stringify(data, null, 2);
+                lastResults = data.results || [];
+                renderFilterPanel(lastResults);
+                await renderResult(currentFile, lastResults);
+
+                placeholder.style.display = 'none';
+                resultContainer.style.display = 'block';
+                const visibleCount = lastResults.filter(r => activeLabels.has(r.label)).length;
+                stats.textContent = `检测到 ${lastResults.length} 个目标，当前展示 ${visibleCount} 个`;
+                showToast('检测完成');
+            } catch (err) {
+                showToast('检测失败：' + err.message, 'error');
+                console.error(err);
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = '开始检测';
+            }
+        });
+
+        function rleDecodeToCanvas(rle, width, height) {
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            const imgData = ctx.createImageData(width, height);
+            const data = imgData.data;
+            for (let i = 0; i < rle.length; i += 2) {
+                const start = rle[i] - 1;
+                const len = rle[i + 1];
+                for (let j = 0; j < len; j++) {
+                    const idx = start + j;
+                    if (idx >= 0 && idx < width * height) {
+                        const p = idx * 4;
+                        data[p] = 255; data[p + 1] = 255; data[p + 2] = 255; data[p + 3] = 255;
+                    }
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+            return canvas;
+        }
+
+        function renderResult(file, results) {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    sourceImage.src = e.target.result;
+                    sourceImage.onload = () => {
+                        const width = sourceImage.naturalWidth;
+                        const height = sourceImage.naturalHeight;
+                        overlayCanvas.width = width;
+                        overlayCanvas.height = height;
+                        const ctx = overlayCanvas.getContext('2d');
+                        ctx.clearRect(0, 0, width, height);
+
+                        const composeCanvas = document.createElement('canvas');
+                        composeCanvas.width = width;
+                        composeCanvas.height = height;
+                        const cctx = composeCanvas.getContext('2d');
+                        cctx.drawImage(sourceImage, 0, 0);
+
+                        legend.innerHTML = '';
+                        const labelSet = new Set();
+
+                        const doBoxes = showBoxes.checked;
+                        const doMasks = showMasks.checked;
+                        const doLabels = showLabels.checked;
+
+                        results.forEach((item, idx) => {
+                            if (!activeLabels.has(item.label)) return;
+
+                            const color = getColor(idx);
+                            const [x1, y1, x2, y2] = item.box;
+                            const label = item.label;
+                            const score = (item.score * 100).toFixed(1) + '%';
+
+                            if (doMasks && item.mask) {
+                                const mw = item.mask_width || Math.max(1, x2 - x1);
+                                const mh = item.mask_height || Math.max(1, y2 - y1);
+                                const maskCanvas = rleDecodeToCanvas(item.mask, mw, mh);
+                                const bw = x2 - x1;
+                                const bh = y2 - y1;
+
+                                ctx.save();
+                                ctx.globalAlpha = 0.45;
+                                ctx.drawImage(maskCanvas, x1, y1, bw, bh);
+                                ctx.restore();
+
+                                cctx.save();
+                                cctx.globalAlpha = 0.45;
+                                cctx.drawImage(maskCanvas, x1, y1, bw, bh);
+                                cctx.restore();
+                            }
+
+                            if (doBoxes) {
+                                ctx.strokeStyle = color;
+                                ctx.lineWidth = Math.max(2, width / 400);
+                                ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+                                cctx.strokeStyle = color;
+                                cctx.lineWidth = ctx.lineWidth;
+                                cctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+                            }
+
+                            if (doLabels && doBoxes) {
+                                const text = `${label} ${score}`;
+                                ctx.font = `bold ${Math.max(12, width / 60)}px sans-serif`;
+                                const textMetrics = ctx.measureText(text);
+                                const textHeight = Math.max(16, width / 50);
+                                ctx.fillStyle = color;
+                                ctx.fillRect(x1, y1 - textHeight, textMetrics.width + 10, textHeight);
+                                ctx.fillStyle = '#fff';
+                                ctx.fillText(text, x1 + 5, y1 - 4);
+
+                                cctx.font = ctx.font;
+                                cctx.fillStyle = color;
+                                cctx.fillRect(x1, y1 - textHeight, textMetrics.width + 10, textHeight);
+                                cctx.fillStyle = '#fff';
+                                cctx.fillText(text, x1 + 5, y1 - 4);
+                            }
+
+                            if (!labelSet.has(label)) {
+                                labelSet.add(label);
+                                const div = document.createElement('div');
+                                div.className = 'legend-item';
+                                div.innerHTML = `<span class="legend-color" style="background:${color}"></span>${label}`;
+                                legend.appendChild(div);
+                            }
+                        });
+
+                        lastResultImage = composeCanvas;
+                        resolve();
+                    };
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        downloadBtn.addEventListener('click', () => {
+            if (!lastResultImage) return;
+            const link = document.createElement('a');
+            link.download = 'result_' + Date.now() + '.png';
+            link.href = lastResultImage.toDataURL('image/png');
+            link.click();
+        });
+    </script>
+</body>
+</html>
