@@ -4,12 +4,28 @@
 #define SAM3_INFER_HPP__
 
 #include "infer/infer.hpp"
+#include "infer/maskPostprocessCann.hpp"
 #include "infer/modelDecoder.hpp"
 #include "infer/modelText.hpp"
 #include "infer/modelVision.hpp"
 #include "infer/sam3type.hpp"
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace sam3
+{
+
+/**
+ * @brief std::vector<int64_t> 的简单哈希，用于 text-encoder 缓存 key。
+ */
+struct VectorInt64Hash
+{
+    std::size_t operator()(const std::vector<int64_t>& v) const noexcept;
+};
+
+} // namespace sam3
 
 /**
  * @brief SAM3 端到端推理实现
@@ -39,6 +55,27 @@ class Sam3Infer : public Infer
     bool load_fpn_pos_2();
     aclError upload_external_text(const ExternalTextFeature& ext, void*& text_features_buf, void*& text_mask_buf);
 
+    /**
+     * @brief text-encoder 输出缓存条目
+     */
+    struct TextFeatureCacheEntry
+    {
+        void* text_features_buf = nullptr;
+        void* text_mask_buf     = nullptr;
+        size_t text_features_size = 0;
+        size_t text_mask_size     = 0;
+    };
+
+    /**
+     * @brief 获取 text-encoder 输出：优先读缓存，未命中则执行 text encoder 并缓存。
+     * @return true 成功
+     */
+    bool get_or_encode_text(const TextPrompt& prompt,
+                            void*& text_features_buf,
+                            void*& text_mask_buf,
+                            size_t& text_features_size,
+                            size_t& text_mask_size);
+
     object::DetectionBoxArray postprocess(const cv::Mat& original_image,
                                           float confidence_threshold,
                                           bool need_mask,
@@ -54,6 +91,9 @@ class Sam3Infer : public Infer
     std::unique_ptr<TextModel> text_model_;
     std::unique_ptr<DecoderModel> decoder_model_;
 
+    // CANN aclnn 单算子实现的 mask 后处理
+    MaskPostprocessCann mask_postprocess_;
+
     // fpn_pos_2 来自 npy，常驻显存
     void* fpn_pos_2_buf_ = nullptr;
     size_t fpn_pos_2_size_ = 0;
@@ -63,6 +103,9 @@ class Sam3Infer : public Infer
     void* ext_text_mask_buf_     = nullptr;
     size_t ext_text_features_size_ = 0;
     size_t ext_text_mask_size_     = 0;
+
+    // text-encoder 输出缓存：key 为 input_ids + attention_mask 拼接后的 64 个 int64
+    std::unordered_map<std::vector<int64_t>, TextFeatureCacheEntry, sam3::VectorInt64Hash> text_feature_cache_;
 };
 
 #endif // SAM3_INFER_HPP__

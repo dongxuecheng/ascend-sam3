@@ -11,7 +11,7 @@
  * @brief 简单示例：加载 SAM3 模型，对单张图片推理并可视化保存结果
  *
  * 用法：
- *   ./sam3_demo <vision_model> <text_model> <decoder_model> <fpn_pos2_npy> <tokenizer_json> <image_path> [prompt_text] [output_path]
+ *   ./ascendsam3_demo <vision_model> <text_model> <decoder_model> <fpn_pos2_npy> <tokenizer_json> <image_path> [prompt_text] [output_path]
  *
  * 其中：
  *   vision_model   - vision encoder .om
@@ -116,7 +116,14 @@ int main(int argc, char** argv)
     auto input = std::make_shared<Sam3Input>();
     input->image = image;
     input->confidence_threshold = 0.3f;
-    input->need_mask = false;
+    if (const char* env_conf = std::getenv("SAM3_CONFIDENCE"))
+    {
+        input->confidence_threshold = std::stof(env_conf);
+    }
+    if (const char* env_mask = std::getenv("SAM3_NEED_MASK"))
+    {
+        input->need_mask = (std::atoi(env_mask) != 0);
+    }
 
     // 使用 tokenizers-cpp 从文本生成 token ids
     sam3::ClipTokenizer tokenizer;
@@ -128,10 +135,17 @@ int main(int argc, char** argv)
 
     if (!prompt_arg.empty())
     {
-        TextPrompt prompt;
-        prompt.text = prompt_arg;
-        std::tie(prompt.input_ids, prompt.attention_mask) = tokenizer.encode(prompt_arg, 32);
-        input->text_prompts.push_back(prompt);
+        // 支持多个类别用英文逗号分隔，例如 "person,car"
+        std::stringstream ss(prompt_arg);
+        std::string token;
+        while (std::getline(ss, token, ','))
+        {
+            if (token.empty()) continue;
+            TextPrompt prompt;
+            prompt.text = token;
+            std::tie(prompt.input_ids, prompt.attention_mask) = tokenizer.encode(token, 32);
+            input->text_prompts.push_back(prompt);
+        }
     }
     else
     {

@@ -1,0 +1,37 @@
+services:
+  sam3-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 可指定 GitHub 镜像地址加速国内构建，例如：
+        # TOKENIZERS_GIT_REPOSITORY: https://gitclone.com/github.com/mlc-ai/tokenizers-cpp.git
+        # ABSEIL_GIT_REPOSITORY: https://gitclone.com/github.com/abseil/abseil-cpp.git
+        - TOKENIZERS_GIT_REPOSITORY
+        - ABSEIL_GIT_REPOSITORY
+    image: ascend-sam3-service:latest
+    container_name: sam3-service
+    privileged: true
+    ports:
+      - "18000:8000"
+    volumes:
+      # 挂载模型目录（根据实际路径修改）
+      - ./models:/app/models:ro
+      # 挂载昇腾驱动库（容器内加载 libascend_hal.so 等驱动库所需）
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+      # 如需持久化日志可打开
+      # - ./logs:/app/logs
+    environment:
+      # 可通过环境变量覆盖默认模型路径
+      - VISION_MODEL=models/om-models/vision-encoder-tuned-2.om
+      - TEXT_MODEL=models/om-models/text-encoder.om
+      - DECODER_MODEL=models/om-models/decoder.om
+      - FPN_POS2=models/om-models/fpn_pos_2_constant.npy
+      - TOKENIZER=models/onnx-models/tokenizer.json
+    # 昇腾设备映射
+    devices:
+      - /dev/davinci0:/dev/davinci0
+      - /dev/davinci_manager:/dev/davinci_manager
+      - /dev/devmm_svm:/dev/devmm_svm
+      - /dev/hisi_hdc:/dev/hisi_hdc
+    restart: unless-stopped

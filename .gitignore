@@ -4,4 +4,7 @@ kernel_meta/
 aoe_workspace/
 models/onnx-models/
 models/om-models/*.om
+third_party/tokenizers-cpp/
+.pytest_cache/
+service/__pycache__
 *.json

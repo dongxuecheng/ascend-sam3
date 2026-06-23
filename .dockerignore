@@ -1,0 +1,13 @@
+# 大型目录与构建产物：直接排除整个目录，避免 Docker 扫描文件系统
+.git/
+build/
+workspace/
+kernel_meta/
+aoe_workspace/
+models/
+<!-- third_party/tokenizers-cpp/ -->
+.pytest_cache/
+
+# Python 缓存
+**/__pycache__/
+**/*.pyc

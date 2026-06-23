@@ -18,6 +18,21 @@ static constexpr int MASK_SIZE   = 288;
 static constexpr int TEXT_LENGTH = 32;
 static constexpr int TEXT_DIM    = 256;
 
+namespace sam3
+{
+
+std::size_t VectorInt64Hash::operator()(const std::vector<int64_t>& v) const noexcept
+{
+    std::size_t h = v.size();
+    for (int64_t x : v)
+    {
+        h ^= static_cast<std::size_t>(x) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    }
+    return h;
+}
+
+} // namespace sam3
+
 static inline float sigmoid(float x)
 {
     return 1.0f / (1.0f + std::exp(-x));
@@ -48,6 +63,21 @@ Sam3Infer::~Sam3Infer()
         aclrtFree(ext_text_mask_buf_);
         ext_text_mask_buf_ = nullptr;
     }
+    for (auto& [key, entry] : text_feature_cache_)
+    {
+        (void)key;
+        if (entry.text_features_buf != nullptr)
+        {
+            aclrtFree(entry.text_features_buf);
+            entry.text_features_buf = nullptr;
+        }
+        if (entry.text_mask_buf != nullptr)
+        {
+            aclrtFree(entry.text_mask_buf);
+            entry.text_mask_buf = nullptr;
+        }
+    }
+    text_feature_cache_.clear();
 }
 
 static bool file_exists(const std::string& path)
@@ -105,6 +135,12 @@ bool Sam3Infer::initialize()
     if (!load_fpn_pos_2())
     {
         std::cerr << "Load fpn_pos_2_constant.npy failed" << std::endl;
+        return false;
+    }
+
+    if (!mask_postprocess_.initialize())
+    {
+        std::cerr << "Init CANN mask postprocess failed" << std::endl;
         return false;
     }
 
@@ -196,6 +232,77 @@ aclError Sam3Infer::upload_external_text(const ExternalTextFeature& ext, void*& 
     return ACL_SUCCESS;
 }
 
+bool Sam3Infer::get_or_encode_text(const TextPrompt& prompt,
+                                   void*& text_features_buf,
+                                   void*& text_mask_buf,
+                                   size_t& text_features_size,
+                                   size_t& text_mask_size)
+{
+    // 构造缓存 key：input_ids (32) + attention_mask (32)
+    std::vector<int64_t> key;
+    key.reserve(2 * TEXT_LENGTH);
+    key.insert(key.end(), prompt.input_ids.begin(), prompt.input_ids.end());
+    key.insert(key.end(), prompt.attention_mask.begin(), prompt.attention_mask.end());
+
+    auto it = text_feature_cache_.find(key);
+    if (it != text_feature_cache_.end())
+    {
+        text_features_buf  = it->second.text_features_buf;
+        text_mask_buf      = it->second.text_mask_buf;
+        text_features_size = it->second.text_features_size;
+        text_mask_size     = it->second.text_mask_size;
+        return true;
+    }
+
+    // 未命中：执行 text encoder
+    aclError ret = text_model_->encode(prompt.input_ids, prompt.attention_mask);
+    if (ret != ACL_SUCCESS)
+    {
+        std::cerr << "Text encode failed: " << ret << std::endl;
+        return false;
+    }
+
+    void* src_features = text_model_->text_features_ptr();
+    void* src_mask     = text_model_->text_mask_ptr();
+    size_t src_features_size = text_model_->text_features_size();
+    size_t src_mask_size     = text_model_->text_mask_size();
+
+    // 分配缓存 buffer 并拷贝（避免被后续 encode 覆盖）
+    void* cache_features = nullptr;
+    void* cache_mask     = nullptr;
+    ret = aclrtMalloc(&cache_features, src_features_size, ACL_MEM_MALLOC_HUGE_FIRST);
+    if (ret != ACL_SUCCESS)
+    {
+        std::cerr << "Malloc cache text features failed: " << ret << std::endl;
+        return false;
+    }
+    ret = aclrtMalloc(&cache_mask, src_mask_size, ACL_MEM_MALLOC_HUGE_FIRST);
+    if (ret != ACL_SUCCESS)
+    {
+        std::cerr << "Malloc cache text mask failed: " << ret << std::endl;
+        aclrtFree(cache_features);
+        return false;
+    }
+
+    CHECK_ACL(aclrtMemcpy(cache_features, src_features_size, src_features, src_features_size,
+                          ACL_MEMCPY_DEVICE_TO_DEVICE));
+    CHECK_ACL(aclrtMemcpy(cache_mask, src_mask_size, src_mask, src_mask_size,
+                          ACL_MEMCPY_DEVICE_TO_DEVICE));
+
+    TextFeatureCacheEntry entry;
+    entry.text_features_buf  = cache_features;
+    entry.text_mask_buf      = cache_mask;
+    entry.text_features_size = src_features_size;
+    entry.text_mask_size     = src_mask_size;
+    text_feature_cache_[std::move(key)] = entry;
+
+    text_features_buf  = cache_features;
+    text_mask_buf      = cache_mask;
+    text_features_size = src_features_size;
+    text_mask_size     = src_mask_size;
+    return true;
+}
+
 object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
 {
     double total_t0 = now_ms();
@@ -206,8 +313,22 @@ object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
         return results;
     }
 
+    // 多线程环境（如 FastAPI/uvicorn）下，当前线程可能没有 ACL device context，
+    // 这里显式设置 device 0，确保后续 ACL 调用在当前线程可用。
+    int device_id = 0;
+    aclError ret = aclrtGetDevice(&device_id);
+    if (ret != ACL_SUCCESS)
+    {
+        ret = aclrtSetDevice(0);
+        if (ret != ACL_SUCCESS)
+        {
+            std::cerr << "aclrtSetDevice(0) failed: " << ret << std::endl;
+            return results;
+        }
+    }
+
     // 1. Vision encoder：每次 forward 都执行
-    aclError ret = vision_model_->encode(input->image);
+    ret = vision_model_->encode(input->image);
     if (ret != ACL_SUCCESS)
     {
         std::cerr << "Vision encode failed: " << ret << std::endl;
@@ -271,15 +392,18 @@ object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
     {
         for (const auto& prompt : input->text_prompts)
         {
-            aclError ret = text_model_->encode(prompt.input_ids, prompt.attention_mask);
-            if (ret != ACL_SUCCESS)
+            void* text_features = nullptr;
+            void* text_mask     = nullptr;
+            size_t text_feature_size = 0;
+            size_t text_mask_size    = 0;
+            if (!get_or_encode_text(prompt, text_features, text_mask, text_feature_size, text_mask_size))
             {
-                std::cerr << "Text encode failed: " << ret << std::endl;
+                std::cerr << "Text encode failed for prompt: " << prompt.text << std::endl;
                 continue;
             }
             process_one(prompt.text.empty() ? "object" : prompt.text,
-                        text_model_->text_features_ptr(), text_model_->text_mask_ptr(),
-                        text_model_->text_features_size(), text_model_->text_mask_size());
+                        text_features, text_mask,
+                        text_feature_size, text_mask_size);
         }
     }
     else
@@ -337,8 +461,28 @@ object::DetectionBoxArray Sam3Infer::postprocess(const cv::Mat& original_image,
     std::sort(score_indices.begin(), score_indices.end(),
               [](const auto& a, const auto& b) { return a.first > b.first; });
 
+    // 批量 CANN mask 解码；失败时回退到单张 CPU/OpenCV 解码
+    std::vector<int> indices;
+    indices.reserve(score_indices.size());
     for (const auto& [score, idx] : score_indices)
     {
+        indices.push_back(idx);
+    }
+
+    std::vector<cv::Mat> cann_masks;
+    bool cann_mask_ok = false;
+    if (need_mask && !indices.empty())
+    {
+        cann_mask_ok = mask_postprocess_.process(pred_masks_buf, indices, orig_h, orig_w, cann_masks);
+        if (!cann_mask_ok)
+        {
+            std::cerr << "CANN mask postprocess failed, fallback to CPU" << std::endl;
+        }
+    }
+
+    for (size_t i = 0; i < score_indices.size(); ++i)
+    {
+        const auto& [score, idx] = score_indices[i];
         const float* box_ptr = boxes_raw.data() + idx * 4;
         float x1 = box_ptr[0] * orig_w;
         float y1 = box_ptr[1] * orig_h;
@@ -360,32 +504,46 @@ object::DetectionBoxArray Sam3Infer::postprocess(const cv::Mat& original_image,
         // 解码 mask：复制 -> 阈值 -> resize 到原图 -> 裁剪到目标框
         if (need_mask)
         {
-            std::vector<float> mask_raw(MASK_SIZE * MASK_SIZE);
-            CHECK_ACL(aclrtMemcpy(mask_raw.data(), mask_bytes,
-                                  static_cast<char*>(pred_masks_buf) + idx * mask_bytes,
-                                  mask_bytes,
-                                  ACL_MEMCPY_DEVICE_TO_HOST));
-
-            cv::Mat mask_mat(MASK_SIZE, MASK_SIZE, CV_32FC1, mask_raw.data());
-            cv::Mat binary_mask;
-            cv::threshold(mask_mat, binary_mask, 0.0f, 255.0f, cv::THRESH_BINARY);
-            binary_mask.convertTo(binary_mask, CV_8UC1);
-
             cv::Mat resized_mask;
-            cv::resize(binary_mask, resized_mask, cv::Size(orig_w, orig_h), 0, 0, cv::INTER_LINEAR);
+            bool have_mask = false;
 
-            // 只保留目标框内的 mask
-            int roi_x = static_cast<int>(std::max(0.0f, x1));
-            int roi_y = static_cast<int>(std::max(0.0f, y1));
-            int roi_w = static_cast<int>(std::min(static_cast<float>(orig_w), x2)) - roi_x;
-            int roi_h = static_cast<int>(std::min(static_cast<float>(orig_h), y2)) - roi_y;
-            if (roi_w > 0 && roi_h > 0)
+            if (cann_mask_ok && i < cann_masks.size())
             {
-                cv::Rect roi(roi_x, roi_y, roi_w, roi_h);
-                object::Segmentation seg;
-                seg.mask = resized_mask(roi).clone();
-                seg.keep_largest_part();
-                det.segmentation = seg;
+                resized_mask = cann_masks[i];
+                have_mask    = true;
+            }
+            else
+            {
+                // CPU 回退路径
+                std::vector<float> mask_raw(MASK_SIZE * MASK_SIZE);
+                CHECK_ACL(aclrtMemcpy(mask_raw.data(), mask_bytes,
+                                      static_cast<char*>(pred_masks_buf) + idx * mask_bytes,
+                                      mask_bytes,
+                                      ACL_MEMCPY_DEVICE_TO_HOST));
+
+                cv::Mat mask_mat(MASK_SIZE, MASK_SIZE, CV_32FC1, mask_raw.data());
+                cv::Mat binary_mask;
+                cv::threshold(mask_mat, binary_mask, 0.0f, 255.0f, cv::THRESH_BINARY);
+                binary_mask.convertTo(binary_mask, CV_8UC1);
+                cv::resize(binary_mask, resized_mask, cv::Size(orig_w, orig_h), 0, 0, cv::INTER_LINEAR);
+                have_mask = true;
+            }
+
+            if (have_mask)
+            {
+                // 只保留目标框内的 mask
+                int roi_x = static_cast<int>(std::max(0.0f, x1));
+                int roi_y = static_cast<int>(std::max(0.0f, y1));
+                int roi_w = static_cast<int>(std::min(static_cast<float>(orig_w), x2)) - roi_x;
+                int roi_h = static_cast<int>(std::min(static_cast<float>(orig_h), y2)) - roi_y;
+                if (roi_w > 0 && roi_h > 0)
+                {
+                    cv::Rect roi(roi_x, roi_y, roi_w, roi_h);
+                    object::Segmentation seg;
+                    seg.mask = resized_mask(roi).clone();
+                    seg.keep_largest_part();
+                    det.segmentation = seg;
+                }
             }
         }
 

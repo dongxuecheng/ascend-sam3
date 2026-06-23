@@ -27,13 +27,13 @@
 
 推理入口为 `Sam3Infer`，`Sam3Input` 支持以下两种文本输入方式：
 
-- **方式一**：传入 `input_ids` / `attention_mask`，由 `text-encoder.om` 推理得到 text feature。`sam3_demo` 内部使用 tokenizer 将原始文本转成 token。
+- **方式一**：传入 `input_ids` / `attention_mask`，由 `text-encoder.om` 推理得到 text feature。`ascendsam3_demo` 内部使用 tokenizer 将原始文本转成 token。
 - **方式二**：直接传入外部预计算的 `text_features` / `text_mask`，跳过 text encoder。
 
 另外，`Sam3Input::need_mask` 用于控制是否输出分割掩码：
 
 - `need_mask = true`（默认）：后处理会解码 `pred_masks`，每个结果可能包含 `segmentation`。
-- `need_mask = false`：跳过 mask 解码，仅返回检测框，可减少 D2H 与 OpenCV 开销。
+- `need_mask = false`：跳过 mask 解码，仅返回检测框，可减少后处理开销。
 
 ---
 
@@ -82,6 +82,42 @@
 
 ---
 
+## 后处理与 Mask 解码
+
+### 后处理流程
+
+`Sam3Infer::postprocess` 的执行步骤：
+
+1. **CPU 筛选**：对 `pred_logits` / `presence_logits` 做 sigmoid，计算最终得分并排序，保留高于 `confidence_threshold` 的结果。
+2. **CANN 批量 mask 解码**（`MaskPostprocessCann`）：
+   - D2D `aclrtMemcpy` 把选中的 N 张 mask 从 `[1, 200, 288, 288]` 拷贝到连续 buffer，得到 `[1, N, 288, 288]`。
+   - `aclnnGtScalar(0.0)` 对 mask logit 做二值化（logit > 0 为前景）。
+   - `aclnnCast` 转为 `uint8`。
+   - `aclnnUpsampleNearest2d` 批量 resize 到原图尺寸 `[1, N, orig_h, orig_w]`。
+   - D2H 并拆分为 N 张 `cv::Mat`。
+3. **CPU 裁剪与后处理**：按每张 mask 对应的检测框裁剪，并调用 `keep_largest_part()` 保留最大连通域。
+
+若 CANN 路径执行失败，会自动回退到 CPU/OpenCV 单张解码。
+
+### 开关：`Sam3Input::need_mask`
+
+- `need_mask = true`（默认）：执行上述 mask 解码流程。
+- `need_mask = false`：跳过所有 mask 解码，仅返回检测框，可减少 D2H 与后处理开销。
+
+### 相关文件
+
+- `src/infer/maskPostprocessCann.hpp` / `src/infer/maskPostprocessCann.cpp`
+- `src/infer/sam3infer.cpp` 中的 `postprocess`
+
+### 链接的 CANN 库
+
+为使用 aclnn 单算子，`CMakeLists.txt` 中额外链接了：
+
+- `nnopbase`：`aclCreateTensor`、`aclCreateIntArray` 等 tensor 构造接口
+- `aclnn_ops_infer`：`aclnnUpsampleNearest2d`
+- `aclnn_math`：`aclnnGtScalar`、`aclnnCast`
+
+---
 
 ## 构建
 
@@ -104,10 +140,10 @@ make -j4
 
 ## 运行
 
-### `sam3_demo`
+### `ascendsam3_demo`
 
 ```bash
-./sam3_demo <vision_model> <text_model> <decoder_model> <fpn_pos2_npy> <tokenizer_json> <image_path> [prompt_text] [output_path]
+./ascendsam3_demo <vision_model> <text_model> <decoder_model> <fpn_pos2_npy> <tokenizer_json> <image_path> [prompt_text] [output_path]
 ```
 
 | 参数 | 说明 | 默认值 |
@@ -121,18 +157,18 @@ make -j4
 | `prompt_text` | 文本 prompt，例如 `"a person"` | 使用内置默认占位 prompt |
 | `output_path` | 可视化结果保存路径 | `workspace/result.jpg` |
 
-### `sam3_bench`
+### `ascendsam3_bench`
 
 ```bash
-./sam3_bench <vision_model> <text_model> <decoder_model> <fpn_pos2_npy> <tokenizer_json> <image_path> <prompt_text>
+./ascendsam3_bench <vision_model> <text_model> <decoder_model> <fpn_pos2_npy> <tokenizer_json> <image_path> <prompt_text>
 ```
 
 ### 示例
 
 ```bash
-./build/sam3_bench models/om-models/vision-encoder-tuned-2.om models/om-models/text-encoder.om models/om-models/decoder.om models/om-models/fpn_pos_2_constant.npy models/onnx-models/tokenizer.json workspace/persons.jpg "person" 
+./build/ascendsam3_bench models/om-models/vision-encoder-tuned-2.om models/om-models/text-encoder.om models/om-models/decoder.om models/om-models/fpn_pos_2_constant.npy models/onnx-models/tokenizer.json workspace/persons.jpg "person" 
 
-./build/sam3_demo models/om-models/vision-encoder-tuned-2.om models/om-models/text-encoder.om models/om-models/decoder.om models/om-models/fpn_pos_2_constant.npy models/onnx-models/tokenizer.json workspace/persons.jpg "person" workspace/result.jpg
+./build/ascendsam3_demo models/om-models/vision-encoder-tuned-2.om models/om-models/text-encoder.om models/om-models/decoder.om models/om-models/fpn_pos_2_constant.npy models/onnx-models/tokenizer.json workspace/persons.jpg "person" workspace/result.jpg
 
 ```
 
@@ -156,14 +192,35 @@ aoe --model=models/onnx-models/vision-encoder.onnx \
 aoe --model=models/onnx-models/decoder_static.onnx \
     --framework=5 \
     --output=models/om-models/decoder_static-tuned \
-    --job_type=2
+    --job_type=2 \
+    --soc_version=Ascend310P3 \
+    --input_format=ND \
+    --input_shape="fpn_feat_0:1,256,288,288;fpn_feat_1:1,256,144,144;fpn_feat_2:1,256,72,72;fpn_pos_2:1,256,72,72;prompt_features:1,32,256;prompt_mask:1,32"
 ```
+
+> 实际 `soc_version` 请与目标设备保持一致。
 
 ---
 
 ## 模型转换
 
 当前仓库中的 `models/om-models/*.om` 是通过 `soc_version=Ascend310` 转换的。若目标设备为 Ascend310P3，请使用对应 `soc_version` 重新转换。
+
+提供了 Docker 一键转换脚本，无需在宿主机安装 CANN：
+
+```bash
+./scripts/convert_models.sh
+```
+
+支持通过环境变量覆盖配置：
+
+```bash
+# 指定目标芯片
+SOC_VERSION=Ascend310P3 ./scripts/convert_models.sh
+
+# 强制覆盖已存在的 .om
+FORCE=1 ./scripts/convert_models.sh
+```
 
 ### Vision Encoder
 
@@ -198,4 +255,57 @@ atc --model=models/onnx-models/decoder_static.onnx \
     --input_format=ND
 ```
 
-> 实际 `soc_version` 请与目标设备保持一致。
+> 实际 `soc_version` 请与目标设备保持一致。  
+> 使用aoe对Vision Encoder模型进行优化，可以缩短时间，job_type=2时有效。     
+> 使用aoe对Decoder模型进行优化后，几乎无收益，且模型结果错误。
+
+---
+
+## FastAPI 推理服务
+
+项目已提供基于 `pybind11` 封装的 Python 模块 `ascendsam3` 与 FastAPI 服务 `service/main.py`。
+
+### 接口
+
+- `GET /health`：健康检查
+- `POST /detect/file`：上传图片文件检测
+- `POST /detect/base64`：传入 base64 编码图片检测
+
+### 请求参数
+
+| 参数 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| `image` | file / string | 图片文件 或 base64 编码图片 | - |
+| `class_names` | list[str] / str | 检测类别列表；file 接口用英文逗号分隔 | `["person"]` |
+| `confidence` | float | 置信度阈值 | `0.3` |
+| `return_mask` | bool | 是否返回 mask PNG | `true` |
+
+### 本地启动
+
+```bash
+cd /home/HwHiAiUser/project/ascend-sam3
+source /home/HwHiAiUser/Ascend/ascend-toolkit/set_env.sh
+python3 -m uvicorn service.main:app --host 0.0.0.0 --port 8000
+```
+
+### Docker 部署
+
+```bash
+docker-compose up -d
+```
+
+模型目录通过 `docker-compose.yml` 中的 `volumes` 挂载到容器内，请根据实际路径修改。
+
+### 调用示例
+
+```bash
+curl -X POST http://localhost:18000/detect/base64 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image": "<base64-image-string>",
+    "class_names": ["person", "car"],
+    "confidence": 0.3,
+    "return_mask": true
+  }'
+```
+
