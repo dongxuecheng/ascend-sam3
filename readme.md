@@ -193,7 +193,6 @@ aoe --model=models/onnx-models/decoder_static.onnx \
     --framework=5 \
     --output=models/om-models/decoder_static-tuned \
     --job_type=2 \
-    --soc_version=Ascend310P3 \
     --input_format=ND \
     --input_shape="fpn_feat_0:1,256,288,288;fpn_feat_1:1,256,144,144;fpn_feat_2:1,256,72,72;fpn_pos_2:1,256,72,72;prompt_features:1,32,256;prompt_mask:1,32"
 ```
