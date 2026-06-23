@@ -186,19 +186,6 @@ aoe --model=models/onnx-models/vision-encoder.onnx \
     --insert_op_conf=models/config/vision.cfg
 ```
 
-### Decoder
-
-```bash
-aoe --model=models/onnx-models/decoder_static.onnx \
-    --framework=5 \
-    --output=models/om-models/decoder_static-tuned \
-    --job_type=2 \
-    --input_format=ND \
-    --input_shape="fpn_feat_0:1,256,288,288;fpn_feat_1:1,256,144,144;fpn_feat_2:1,256,72,72;fpn_pos_2:1,256,72,72;prompt_features:1,32,256;prompt_mask:1,32"
-```
-
-> 实际 `soc_version` 请与目标设备保持一致。
-
 ---
 
 ## 模型转换
@@ -251,7 +238,7 @@ atc --model=models/onnx-models/decoder_static.onnx \
     --framework=5 \
     --output=models/om-models/decoder_static \
     --soc_version=Ascend310P3 \
-    --input_format=ND
+    --input_shape="fpn_feat_0:1,256,288,288;fpn_feat_1:1,256,144,144;fpn_feat_2:1,256,72,72;fpn_pos_2:1,256,72,72;prompt_features:1,32,256;prompt_mask:1,32"
 ```
 
 > 实际 `soc_version` 请与目标设备保持一致。  
@@ -267,8 +254,8 @@ atc --model=models/onnx-models/decoder_static.onnx \
 ### 接口
 
 - `GET /health`：健康检查
-- `POST /detect/file`：上传图片文件检测
-- `POST /detect/base64`：传入 base64 编码图片检测
+- `POST /predict/file`：上传图片文件检测
+- `POST /predict/base64`：传入 base64 编码图片检测
 
 ### 请求参数
 
