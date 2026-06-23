@@ -11,7 +11,7 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOC_VERSION="${SOC_VERSION:-Ascend310P3}"
 FORCE="${FORCE:-0}"
 
-IMAGE="swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.2.rc1-310p-ubuntu22.04-py3.11"
+IMAGE="swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-310p-ubuntu22.04-py3.11"
 MODEL_DIR="/app/models"
 
 echo "======================================"
@@ -52,28 +52,28 @@ run_aoe() {
     echo "[AOE 调优] ${name} -> ${output}.om"
     docker run --rm \
         --privileged \
-        -e PATH="/usr/local/python3.11.13/bin:/usr/local/Ascend/ascend-toolkit/latest/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        -e PATH="/usr/local/python3.11.15/bin:/usr/local/Ascend/ascend-toolkit/latest/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
         -e ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest \
-        -e LD_LIBRARY_PATH="/usr/local/python3.11.13/lib:/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/ascend-toolkit/latest/lib64/plugin/opskernel:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/develop/lib64" \
+        -e LD_LIBRARY_PATH="/usr/local/python3.11.15/lib:/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/ascend-toolkit/latest/lib64/plugin/opskernel:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/develop/lib64" \
         -v "${PROJECT_ROOT}:/app" \
         ${DRIVER_MOUNT} \
         ${IMAGE} \
         aoe --model="${MODEL_DIR}/onnx-models/${onnx_path}" \
             --framework=5 \
             --output="${MODEL_DIR}/om-models/${output}" \
-            --job_type=1 \
+            --job_type=2 \
             ${extra_args}
 }
 
 # Vision Encoder
-# run_aoe "Vision Encoder" "vision-encoder.onnx" "vision-encoder-tuned-2" \
-#     --input_format=NCHW \
-#     --input_shape="images:1,3,1008,1008" \
-#     --insert_op_conf="${MODEL_DIR}/config/vision.cfg"
+run_aoe "Vision Encoder" "static.onnx" "vision-encoder-tuned-900-2" \
+    --input_format=NCHW \
+    --input_shape="images:1,3,1008,1008" \
+    --insert_op_conf="${MODEL_DIR}/config/vision.cfg"
 
 # Decoder
-run_aoe "Decoder" "decoder_static.onnx" "decoder_static-tuned" \
-    --input_shape="fpn_feat_0:1,256,288,288;fpn_feat_1:1,256,144,144;fpn_feat_2:1,256,72,72;fpn_pos_2:1,256,72,72;prompt_features:1,32,256;prompt_mask:1,32"
+# run_aoe "Decoder" "decoder_static.onnx" "decoder_static-tuned" \
+#     --input_shape="fpn_feat_0:1,256,288,288;fpn_feat_1:1,256,144,144;fpn_feat_2:1,256,72,72;fpn_pos_2:1,256,72,72;prompt_features:1,32,256;prompt_mask:1,32"
 
 echo ""
 echo "======================================"

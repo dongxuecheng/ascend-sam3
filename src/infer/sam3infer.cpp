@@ -471,9 +471,9 @@ object::DetectionBoxArray Sam3Infer::postprocess(const cv::Mat& original_image,
 
     std::vector<cv::Mat> cann_masks;
     bool cann_mask_ok = false;
-    if (need_mask && !indices.empty())
+    if (cann_mask_ok && need_mask && !indices.empty())
     {
-        cann_mask_ok = mask_postprocess_.process(pred_masks_buf, indices, orig_h, orig_w, cann_masks);
+        // cann_mask_ok = mask_postprocess_.process(pred_masks_buf, indices, orig_h, orig_w, cann_masks);
         if (!cann_mask_ok)
         {
             std::cerr << "CANN mask postprocess failed, fallback to CPU" << std::endl;
@@ -514,38 +514,63 @@ object::DetectionBoxArray Sam3Infer::postprocess(const cv::Mat& original_image,
             }
             else
             {
-                // CPU 回退路径：先对 float mask 做插值放大，再阈值二值化，
-                // 比“先二值化再放大”能显著减少锯齿。
                 std::vector<float> mask_raw(MASK_SIZE * MASK_SIZE);
                 CHECK_ACL(aclrtMemcpy(mask_raw.data(), mask_bytes,
-                                      static_cast<char*>(pred_masks_buf) + idx * mask_bytes,
-                                      mask_bytes,
-                                      ACL_MEMCPY_DEVICE_TO_HOST));
+                                    static_cast<char*>(pred_masks_buf) + idx * mask_bytes,
+                                    mask_bytes,
+                                    ACL_MEMCPY_DEVICE_TO_HOST));
 
-                cv::Mat mask_mat(MASK_SIZE, MASK_SIZE, CV_32FC1, mask_raw.data());
-                cv::Mat resized_float;
-                cv::resize(mask_mat, resized_float, cv::Size(orig_w, orig_h), 0, 0, cv::INTER_LINEAR);
-                cv::Mat binary_mask;
-                cv::threshold(resized_float, binary_mask, 0.0f, 255.0f, cv::THRESH_BINARY);
-                binary_mask.convertTo(resized_mask, CV_8UC1);
-                have_mask = true;
-            }
-
-            if (have_mask)
-            {
-                // 只保留目标框内的 mask
+                // 2. 计算原图尺度下的目标 ROI 坐标
                 int roi_x = static_cast<int>(std::max(0.0f, x1));
                 int roi_y = static_cast<int>(std::max(0.0f, y1));
                 int roi_w = static_cast<int>(std::min(static_cast<float>(orig_w), x2)) - roi_x;
                 int roi_h = static_cast<int>(std::min(static_cast<float>(orig_h), y2)) - roi_y;
+
                 if (roi_w > 0 && roi_h > 0)
                 {
-                    cv::Rect roi(roi_x, roi_y, roi_w, roi_h);
+                    // 3. 计算原图到低分辨率 mask 空间的缩放比例
+                    float scale_x = (float)MASK_SIZE / orig_w;
+                    float scale_y = (float)MASK_SIZE / orig_h;
+
+                    // 4. 将原图的 ROI 映射回 288x288 的低分辨率空间
+                    int low_x = static_cast<int>(std::round(roi_x * scale_x));
+                    int low_y = static_cast<int>(std::round(roi_y * scale_y));
+                    int low_w = static_cast<int>(std::round((roi_x + roi_w) * scale_x)) - low_x;
+                    int low_h = static_cast<int>(std::round((roi_y + roi_h) * scale_y)) - low_y;
+
+                    // 边界安全防护：防止浮点误差导致越界
+                    low_x = std::max(0, std::min(low_x, MASK_SIZE - 1));
+                    low_y = std::max(0, std::min(low_y, MASK_SIZE - 1));
+                    low_w = std::max(1, std::min(low_w, MASK_SIZE - low_x));
+                    low_h = std::max(1, std::min(low_h, MASK_SIZE - low_y));
+
+                    cv::Rect low_roi(low_x, low_y, low_w, low_h);
+
+                    // 5. 截取低分辨率下的目标局部 Mask
+                    cv::Mat mask_mat(MASK_SIZE, MASK_SIZE, CV_32FC1, mask_raw.data());
+                    cv::Mat cropped_low = mask_mat(low_roi).clone(); // 使用 clone 拷贝数据
+
+                    // 6. 仅对该局部区域使用稳定的 cv::resize 进行放大
+                    cv::Mat resized_float;
+                    cv::resize(cropped_low, resized_float, cv::Size(roi_w, roi_h), 0, 0, cv::INTER_LINEAR);
+
+                    // 7. 二值化
+                    cv::Mat binary_mask;
+                    cv::threshold(resized_float, binary_mask, 0.0f, 255.0f, cv::THRESH_BINARY);
+
+                    // 8. 封装结果
                     object::Segmentation seg;
-                    seg.mask = resized_mask(roi).clone();
+                    binary_mask.convertTo(seg.mask, CV_8UC1);
                     seg.keep_largest_part();
                     det.segmentation = seg;
                 }
+            }
+
+            if (have_mask)
+            {
+                // seg.mask = resized_mask.clone();
+                // seg.keep_largest_part();
+                // det.segmentation = seg;
             }
         }
 

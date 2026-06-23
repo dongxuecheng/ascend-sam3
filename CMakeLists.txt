@@ -15,6 +15,7 @@ endif()
 include_directories(
     ${ASCEND_HOME}/include/acl
     ${ASCEND_HOME}/include
+    ${ASCEND_HOME}/include/aclnnop
     ${CMAKE_SOURCE_DIR}/src
 )
 
