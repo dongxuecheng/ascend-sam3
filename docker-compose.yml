@@ -19,6 +19,7 @@ services:
       - ./models:/app/models:ro
       # 挂载昇腾驱动库（容器内加载 libascend_hal.so 等驱动库所需）
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+      - ./service:/app/service:ro
       # 如需持久化日志可打开
       # - ./logs:/app/logs
     environment:
@@ -28,6 +29,11 @@ services:
       - DECODER_MODEL=models/om-models/decoder.om
       - FPN_POS2=models/om-models/fpn_pos_2_constant.npy
       - TOKENIZER=models/onnx-models/tokenizer.json
+      # - VISION_MODEL=models/om-models/EfficientSAM3/ef-vision-encoder.om
+      # - TEXT_MODEL=models/om-models/EfficientSAM3/ef-text-encoder.om
+      # - DECODER_MODEL=models/om-models/EfficientSAM3/ef-decoder.om
+      # - FPN_POS2=models/om-models/fpn_pos_2_constant.npy
+      # - TOKENIZER=models/om-models/tokenizer.json
     # 昇腾设备映射
     devices:
       - /dev/davinci0:/dev/davinci0

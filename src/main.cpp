@@ -22,6 +22,8 @@
  *   prompt_text    - 文本 prompt，例如 "a person"；为空时使用默认占位 prompt
  */
 
+const int tokenizer_length = 32;
+
 static void visualize(cv::Mat& image, const object::DetectionBoxArray& boxes)
 {
     const std::vector<cv::Scalar> colors = {
@@ -143,7 +145,7 @@ int main(int argc, char** argv)
             if (token.empty()) continue;
             TextPrompt prompt;
             prompt.text = token;
-            std::tie(prompt.input_ids, prompt.attention_mask) = tokenizer.encode(token, 32);
+            std::tie(prompt.input_ids, prompt.attention_mask) = tokenizer.encode(token, tokenizer_length);
             input->text_prompts.push_back(prompt);
         }
     }
@@ -152,12 +154,12 @@ int main(int argc, char** argv)
         // 默认占位 prompt，仅用于测试模型能否跑通，不会得到真实检测结果
         TextPrompt prompt;
         prompt.text    = "a person";
-        prompt.input_ids.resize(32, 0);
-        prompt.attention_mask.resize(32, 1);
+        prompt.input_ids.resize(tokenizer_length, 0);
+        prompt.attention_mask.resize(tokenizer_length, 1);
         prompt.input_ids[0] = 49406; // <|startoftext|>
         prompt.input_ids[1] = 320;   // a
         prompt.input_ids[2] = 2533;  // person
-        prompt.input_ids[3] = 49407; // <|endoftext|>
+        prompt.input_ids[3] = 49407; // 
         input->text_prompts.push_back(prompt);
     }
 

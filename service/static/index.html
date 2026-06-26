@@ -13,7 +13,7 @@
             color: #333;
         }
         .container {
-            max-width: 1400px;
+            max-width: 1600px;
             margin: 0 auto;
             padding: 20px;
         }
@@ -24,8 +24,12 @@
         }
         .main-grid {
             display: grid;
-            grid-template-columns: 360px 1fr;
-            gap: 20px;
+            grid-template-columns: 320px 1fr 320px;
+            gap: 16px;
+            align-items: start;
+        }
+        @media (max-width: 1200px) {
+            .main-grid { grid-template-columns: 280px 1fr; }
         }
         @media (max-width: 900px) {
             .main-grid { grid-template-columns: 1fr; }
@@ -33,7 +37,7 @@
         .panel {
             background: #fff;
             border-radius: 12px;
-            padding: 20px;
+            padding: 16px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.06);
         }
         .form-group {
@@ -45,7 +49,7 @@
             font-weight: 500;
             font-size: 14px;
         }
-        input[type="text"], input[type="range"], input[type="file"], select, textarea {
+        input[type="text"], input[type="number"], input[type="range"], input[type="file"], select, textarea {
             width: 100%;
             padding: 8px 10px;
             border: 1px solid #d1d5db;
@@ -123,6 +127,9 @@
             top: 0;
             left: 0;
         }
+        .result-layout {
+            display: block;
+        }
         .result-actions {
             margin-top: 12px;
             display: flex;
@@ -130,7 +137,33 @@
         }
         .result-actions button { flex: 1; }
         .json-panel {
-            margin-top: 20px;
+            margin-top: 16px;
+        }
+        #resultListPanel {
+            display: flex;
+            flex-direction: column;
+            max-height: calc(100vh - 40px);
+            position: sticky;
+            top: 20px;
+            align-self: start;
+        }
+        #resultListPanel h3 {
+            margin-top: 0;
+            margin-bottom: 12px;
+            flex-shrink: 0;
+        }
+        .sort-controls {
+            flex-shrink: 0;
+        }
+        .sort-controls select {
+            width: 100%;
+            padding: 6px 8px;
+            font-size: 13px;
+        }
+        #detectionList {
+            overflow-y: auto;
+            flex: 1;
+            min-height: 0;
         }
         .json-panel textarea {
             width: 100%;
@@ -164,6 +197,84 @@
             height: 14px;
             border-radius: 3px;
             border: 1px solid rgba(0,0,0,0.1);
+        }
+        .detection-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 6px;
+        }
+        @media (max-width: 900px) {
+            .detection-grid { grid-template-columns: repeat(3, 1fr); }
+        }
+        @media (max-width: 700px) {
+            .detection-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+        .filter-chip-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+        .filter-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 999px;
+            border: 2px solid;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            user-select: none;
+            transition: all 0.15s;
+            background: #fff;
+        }
+        .filter-chip:hover {
+            opacity: 0.85;
+        }
+        .filter-chip .chip-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+        .filter-chip .chip-check {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            margin-left: 2px;
+        }
+        .filter-chip.inactive {
+            border-color: #e2e8f0 !important;
+            background: #f8fafc !important;
+            color: #94a3b8 !important;
+        }
+        .filter-chip.inactive .chip-dot {
+            background: #cbd5e1 !important;
+        }
+        .filter-chip.inactive .chip-check {
+            display: none;
+        }
+        .detection-card {
+            background: #f8fafc;
+            border: 2px solid #e2e8f0;
+            border-radius: 6px;
+            padding: 8px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: border-color 0.15s, background 0.15s;
+            overflow-wrap: break-word;
+        }
+        .detection-card:hover {
+            border-color: #93c5fd;
+            background: #eff6ff;
+        }
+        .detection-card.selected {
+            border-color: #2563eb;
+            background: #dbeafe;
         }
         .tag-input {
             display: flex;
@@ -270,13 +381,17 @@
             <div class="panel">
                 <h3>检测结果</h3>
                 <div id="resultContainer" style="display:none">
-                    <div class="image-wrapper" id="imageWrapper">
-                        <img id="sourceImage" alt="source">
-                        <canvas id="overlayCanvas"></canvas>
-                    </div>
-                    <div class="legend" id="legend"></div>
-                    <div class="result-actions">
-                        <button id="downloadBtn" class="secondary">下载结果图</button>
+                    <div class="result-layout">
+                        <div class="result-main">
+                            <div class="image-wrapper" id="imageWrapper">
+                                <img id="sourceImage" alt="source">
+                                <canvas id="overlayCanvas"></canvas>
+                            </div>
+                            <div class="legend" id="legend"></div>
+                            <div class="result-actions">
+                                <button id="downloadBtn" class="secondary">下载结果图</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div id="placeholder" style="text-align:center;color:#94a3b8;padding:60px 0">
@@ -290,10 +405,33 @@
                         <button type="button" id="selectNoneBtn" class="secondary">全不选</button>
                     </div>
                 </div>
+                <div id="scoreFilterPanel" class="form-group" style="display:none">
+                    <label for="displayConfidence">展示置信度阈值（前端过滤）</label>
+                    <input type="range" id="displayConfidence" min="0" max="1" step="0.01" value="0.0">
+                    <div class="range-value" id="displayConfidenceValue">0.00</div>
+                </div>
+                <div id="areaFilterPanel" class="form-group" style="display:none">
+                    <label for="minArea">最小面积（像素）</label>
+                    <input type="number" id="minArea" min="0" step="1" value="0" placeholder="0">
+                </div>
                 <div class="json-panel">
                     <label>JSON 结果</label>
                     <textarea id="jsonOutput" readonly placeholder="检测结果 JSON 将显示在这里"></textarea>
                 </div>
+            </div>
+
+            <div class="panel" id="resultListPanel" style="display:none">
+                <h3>检测结果列表</h3>
+                <div class="sort-controls" style="margin-bottom:10px">
+                    <select id="sortBy">
+                        <option value="default">默认顺序</option>
+                        <option value="area_desc">面积从大到小</option>
+                        <option value="area_asc">面积从小到大</option>
+                        <option value="score_desc">置信度从高到低</option>
+                        <option value="score_asc">置信度从低到高</option>
+                    </select>
+                </div>
+                <div id="detectionList"></div>
             </div>
         </div>
     </div>
@@ -315,6 +453,7 @@
         const stats = document.getElementById('stats');
         const legend = document.getElementById('legend');
         const downloadBtn = document.getElementById('downloadBtn');
+        const detectionList = document.getElementById('detectionList');
         const toast = document.getElementById('toast');
         const tagList = document.getElementById('tagList');
         const tagAdd = document.getElementById('tagAdd');
@@ -325,11 +464,23 @@
         const filterList = document.getElementById('filterList');
         const selectAllBtn = document.getElementById('selectAllBtn');
         const selectNoneBtn = document.getElementById('selectNoneBtn');
+        const scoreFilterPanel = document.getElementById('scoreFilterPanel');
+        const displayConfidence = document.getElementById('displayConfidence');
+        const displayConfidenceValue = document.getElementById('displayConfidenceValue');
+        const areaFilterPanel = document.getElementById('areaFilterPanel');
+        const minAreaInput = document.getElementById('minArea');
+        const resultListPanel = document.getElementById('resultListPanel');
+        const sortBy = document.getElementById('sortBy');
 
         let currentFile = null;
         let lastResults = [];
         let lastResultImage = null;
         let activeLabels = new Set();
+        let displayConfidenceThreshold = 0.0;
+        let minAreaThreshold = 0;
+        let selectedResultIndex = null;
+        let lastVisibleItems = [];
+        let sortMode = 'default';
 
         const colors = [
             '#ef4444', '#22c55e', '#3b82f6', '#f59e0b', '#a855f7',
@@ -338,8 +489,25 @@
 
         let tags = ['person'];
 
-        function getColor(index) {
-            return colors[index % colors.length];
+        function hashString(str) {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = str.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            return Math.abs(hash);
+        }
+
+        function getColor(label) {
+            return colors[hashString(label) % colors.length];
+        }
+
+        function hexToRgb(hex) {
+            const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+            return result ? {
+                r: parseInt(result[1], 16),
+                g: parseInt(result[2], 16),
+                b: parseInt(result[3], 16)
+            } : { r: 255, g: 255, b: 255 };
         }
 
         function showToast(message, type = 'success') {
@@ -417,51 +585,153 @@
             });
         });
 
+        displayConfidence.addEventListener('input', () => {
+            displayConfidenceThreshold = parseFloat(displayConfidence.value);
+            displayConfidenceValue.textContent = displayConfidenceThreshold.toFixed(2);
+            if (currentFile && lastResults.length > 0) {
+                renderResult(currentFile, lastResults);
+                updateStats();
+            }
+        });
+
+        minAreaInput.addEventListener('input', () => {
+            const value = parseInt(minAreaInput.value, 10);
+            minAreaThreshold = isNaN(value) || value < 0 ? 0 : value;
+            if (currentFile && lastResults.length > 0) {
+                renderResult(currentFile, lastResults);
+                updateStats();
+            }
+        });
+
+        sortBy.addEventListener('change', () => {
+            sortMode = sortBy.value;
+            if (currentFile && lastResults.length > 0) {
+                renderResult(currentFile, lastResults);
+                updateStats();
+            }
+        });
+
+        function sortVisibleItems(items) {
+            if (sortMode === 'default') return items;
+            const sorted = [...items];
+            switch (sortMode) {
+                case 'area_desc':
+                    sorted.sort((a, b) => getBoxArea(b.item) - getBoxArea(a.item));
+                    break;
+                case 'area_asc':
+                    sorted.sort((a, b) => getBoxArea(a.item) - getBoxArea(b.item));
+                    break;
+                case 'score_desc':
+                    sorted.sort((a, b) => b.item.score - a.item.score);
+                    break;
+                case 'score_asc':
+                    sorted.sort((a, b) => a.item.score - b.item.score);
+                    break;
+            }
+            return sorted;
+        }
+
+        function getBoxArea(item) {
+            if (!item.box || item.box.length < 4) return 0;
+            const [x1, y1, x2, y2] = item.box;
+            return Math.max(0, (x2 - x1) * (y2 - y1));
+        }
+
+        function isResultVisible(item) {
+            return activeLabels.has(item.label) &&
+                   item.score >= displayConfidenceThreshold &&
+                   getBoxArea(item) >= minAreaThreshold;
+        }
+
+        function updateStats() {
+            const visibleCount = lastResults.filter(isResultVisible).length;
+            stats.textContent = `检测到 ${lastResults.length} 个目标，当前展示 ${visibleCount} 个`;
+        }
+
+        function updateChipVisual(chip, label, isActive) {
+            const color = getColor(label);
+            const rgb = hexToRgb(color);
+            if (isActive) {
+                chip.classList.remove('inactive');
+                chip.style.borderColor = color;
+                chip.style.background = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.12)`;
+                chip.style.color = color;
+            } else {
+                chip.classList.add('inactive');
+                chip.style.borderColor = '';
+                chip.style.background = '';
+                chip.style.color = '';
+            }
+        }
+
         function renderFilterPanel(results) {
             const labels = [...new Set(results.map(r => r.label))];
             activeLabels = new Set(labels);
+            displayConfidenceThreshold = 0.0;
+            displayConfidence.value = '0.0';
+            displayConfidenceValue.textContent = '0.00';
+            minAreaThreshold = 0;
+            minAreaInput.value = '0';
+
             if (labels.length <= 1) {
                 filterPanel.style.display = 'none';
-                return;
-            }
-            filterPanel.style.display = 'block';
-            filterList.innerHTML = '';
-            labels.forEach((label, idx) => {
-                const row = document.createElement('div');
-                row.className = 'checkbox-row';
-                const id = 'filter-' + idx;
-                row.innerHTML = `
-                    <input type="checkbox" id="${id}" value="${label}" checked>
-                    <label for="${id}" style="margin:0">${label}</label>
-                `;
-                filterList.appendChild(row);
-            });
-            filterList.querySelectorAll('input').forEach(cb => {
-                cb.addEventListener('change', () => {
-                    if (cb.checked) {
-                        activeLabels.add(cb.value);
-                    } else {
-                        activeLabels.delete(cb.value);
-                    }
-                    if (currentFile) renderResult(currentFile, lastResults);
+            } else {
+                filterPanel.style.display = 'block';
+                filterList.innerHTML = '';
+                filterList.className = 'filter-chip-list';
+                labels.forEach((label) => {
+                    const color = getColor(label);
+                    const chip = document.createElement('div');
+                    chip.className = 'filter-chip';
+                    chip.dataset.label = label;
+                    chip.innerHTML = `
+                        <span class="chip-dot" style="background:${color}"></span>
+                        <span>${label}</span>
+                        <span class="chip-check" style="background:${color};color:#fff">✓</span>
+                    `;
+                    updateChipVisual(chip, label, true);
+                    chip.addEventListener('click', () => {
+                        if (activeLabels.has(label)) {
+                            activeLabels.delete(label);
+                        } else {
+                            activeLabels.add(label);
+                        }
+                        updateChipVisual(chip, label, activeLabels.has(label));
+                        if (currentFile) {
+                            renderResult(currentFile, lastResults);
+                            updateStats();
+                        }
+                    });
+                    filterList.appendChild(chip);
                 });
-            });
+            }
+
+            scoreFilterPanel.style.display = results.length > 0 ? 'block' : 'none';
+            areaFilterPanel.style.display = results.length > 0 ? 'block' : 'none';
         }
 
         selectAllBtn.addEventListener('click', () => {
-            filterList.querySelectorAll('input').forEach(cb => {
-                cb.checked = true;
-                activeLabels.add(cb.value);
+            filterList.querySelectorAll('.filter-chip').forEach(chip => {
+                const label = chip.dataset.label;
+                activeLabels.add(label);
+                updateChipVisual(chip, label, true);
             });
-            if (currentFile) renderResult(currentFile, lastResults);
+            if (currentFile) {
+                renderResult(currentFile, lastResults);
+                updateStats();
+            }
         });
 
         selectNoneBtn.addEventListener('click', () => {
-            filterList.querySelectorAll('input').forEach(cb => {
-                cb.checked = false;
-                activeLabels.delete(cb.value);
+            filterList.querySelectorAll('.filter-chip').forEach(chip => {
+                const label = chip.dataset.label;
+                activeLabels.delete(label);
+                updateChipVisual(chip, label, false);
             });
-            if (currentFile) renderResult(currentFile, lastResults);
+            if (currentFile) {
+                renderResult(currentFile, lastResults);
+                updateStats();
+            }
         });
 
         submitBtn.addEventListener('click', async () => {
@@ -502,8 +772,7 @@
 
                 placeholder.style.display = 'none';
                 resultContainer.style.display = 'block';
-                const visibleCount = lastResults.filter(r => activeLabels.has(r.label)).length;
-                stats.textContent = `检测到 ${lastResults.length} 个目标，当前展示 ${visibleCount} 个`;
+                updateStats();
                 showToast('检测完成');
             } catch (err) {
                 showToast('检测失败：' + err.message, 'error');
@@ -514,13 +783,14 @@
             }
         });
 
-        function rleDecodeToCanvas(rle, width, height) {
+        function rleDecodeToCanvas(rle, width, height, color = null) {
             const canvas = document.createElement('canvas');
             canvas.width = width;
             canvas.height = height;
             const ctx = canvas.getContext('2d');
             const imgData = ctx.createImageData(width, height);
             const data = imgData.data;
+            const rgb = color ? hexToRgb(color) : { r: 255, g: 255, b: 255 };
             for (let i = 0; i < rle.length; i += 2) {
                 const start = rle[i] - 1;
                 const len = rle[i + 1];
@@ -528,12 +798,47 @@
                     const idx = start + j;
                     if (idx >= 0 && idx < width * height) {
                         const p = idx * 4;
-                        data[p] = 255; data[p + 1] = 255; data[p + 2] = 255; data[p + 3] = 255;
+                        data[p] = rgb.r;
+                        data[p + 1] = rgb.g;
+                        data[p + 2] = rgb.b;
+                        data[p + 3] = 255;
                     }
                 }
             }
             ctx.putImageData(imgData, 0, 0);
             return canvas;
+        }
+
+        function renderDetectionList(visibleItems) {
+            resultListPanel.style.display = 'flex';
+            detectionList.style.display = 'block';
+            const grid = document.createElement('div');
+            grid.className = 'detection-grid';
+            visibleItems.forEach(({ item, originalIndex }, idx) => {
+                const area = getBoxArea(item);
+                const boxStr = item.box ? item.box.map(v => Math.round(v)).join(', ') : '-';
+                const card = document.createElement('div');
+                card.className = 'detection-card' + (originalIndex === selectedResultIndex ? ' selected' : '');
+                card.innerHTML = `
+                    <div style="font-weight:600;margin-bottom:3px;line-height:1.3">
+                        <span style="display:inline-block;width:8px;height:8px;background:${getColor(item.label)};margin-right:4px;border-radius:2px"></span>
+                        #${idx + 1} ${item.label}
+                    </div>
+                    <div style="line-height:1.4">${(item.score * 100).toFixed(0)}% · ${area.toLocaleString()}px²</div>
+                    <div style="color:#64748b;font-size:10px;line-height:1.3;margin-top:1px">[${boxStr}]</div>
+                `;
+                card.addEventListener('click', async () => {
+                    selectedResultIndex = originalIndex;
+                    await renderResult(currentFile, lastResults);
+                    const selectedCard = detectionList.querySelector('.detection-card.selected');
+                    if (selectedCard) {
+                        selectedCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    }
+                });
+                grid.appendChild(card);
+            });
+            detectionList.innerHTML = '';
+            detectionList.appendChild(grid);
         }
 
         function renderResult(file, results) {
@@ -556,46 +861,61 @@
                         cctx.drawImage(sourceImage, 0, 0);
 
                         legend.innerHTML = '';
+                        detectionList.innerHTML = '';
+                        detectionList.style.display = 'none';
                         const labelSet = new Set();
 
                         const doBoxes = showBoxes.checked;
                         const doMasks = showMasks.checked;
                         const doLabels = showLabels.checked;
 
-                        results.forEach((item, idx) => {
-                            if (!activeLabels.has(item.label)) return;
+                        lastVisibleItems = [];
+                        results.forEach((item, originalIndex) => {
+                            if (!isResultVisible(item)) return;
+                            lastVisibleItems.push({ item, originalIndex });
+                        });
+                        lastVisibleItems = sortVisibleItems(lastVisibleItems);
 
-                            const color = getColor(idx);
+                        function drawItem({ item, originalIndex }, isHighlight) {
                             const [x1, y1, x2, y2] = item.box;
                             const label = item.label;
+                            const color = getColor(label);
                             const score = (item.score * 100).toFixed(1) + '%';
+                            const alpha = isHighlight ? 0.65 : 0.45;
+                            const lineWidth = isHighlight ? Math.max(4, width / 250) : Math.max(2, width / 400);
 
                             if (doMasks && item.mask) {
                                 const mw = item.mask_width || Math.max(1, x2 - x1);
                                 const mh = item.mask_height || Math.max(1, y2 - y1);
-                                const maskCanvas = rleDecodeToCanvas(item.mask, mw, mh);
+                                const maskCanvas = rleDecodeToCanvas(item.mask, mw, mh, color);
                                 const bw = x2 - x1;
                                 const bh = y2 - y1;
 
                                 ctx.save();
-                                ctx.globalAlpha = 0.45;
+                                ctx.globalAlpha = alpha;
                                 ctx.drawImage(maskCanvas, x1, y1, bw, bh);
                                 ctx.restore();
 
                                 cctx.save();
-                                cctx.globalAlpha = 0.45;
+                                cctx.globalAlpha = alpha;
                                 cctx.drawImage(maskCanvas, x1, y1, bw, bh);
                                 cctx.restore();
                             }
 
                             if (doBoxes) {
                                 ctx.strokeStyle = color;
-                                ctx.lineWidth = Math.max(2, width / 400);
+                                ctx.lineWidth = lineWidth;
                                 ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
 
                                 cctx.strokeStyle = color;
-                                cctx.lineWidth = ctx.lineWidth;
+                                cctx.lineWidth = lineWidth;
                                 cctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+                                if (isHighlight) {
+                                    ctx.strokeStyle = '#fff';
+                                    ctx.lineWidth = Math.max(2, width / 500);
+                                    ctx.strokeRect(x1 - 3, y1 - 3, x2 - x1 + 6, y2 - y1 + 6);
+                                }
                             }
 
                             if (doLabels && doBoxes) {
@@ -622,7 +942,21 @@
                                 div.innerHTML = `<span class="legend-color" style="background:${color}"></span>${label}`;
                                 legend.appendChild(div);
                             }
-                        });
+                        }
+
+                        lastVisibleItems.forEach(item => drawItem(item, false));
+
+                        if (selectedResultIndex !== null) {
+                            const selected = lastVisibleItems.find(v => v.originalIndex === selectedResultIndex);
+                            if (selected) drawItem(selected, true);
+                        }
+
+                        if (lastVisibleItems.length > 0) {
+                            renderDetectionList(lastVisibleItems);
+                        } else {
+                            resultListPanel.style.display = 'none';
+                            detectionList.innerHTML = '';
+                        }
 
                         lastResultImage = composeCanvas;
                         resolve();
@@ -638,6 +972,25 @@
             link.download = 'result_' + Date.now() + '.png';
             link.href = lastResultImage.toDataURL('image/png');
             link.click();
+        });
+
+        overlayCanvas.addEventListener('click', (e) => {
+            if (!currentFile || lastVisibleItems.length === 0) return;
+            const rect = overlayCanvas.getBoundingClientRect();
+            const scaleX = overlayCanvas.width / rect.width;
+            const scaleY = overlayCanvas.height / rect.height;
+            const x = (e.clientX - rect.left) * scaleX;
+            const y = (e.clientY - rect.top) * scaleY;
+
+            for (let i = lastVisibleItems.length - 1; i >= 0; i--) {
+                const { item, originalIndex } = lastVisibleItems[i];
+                const [x1, y1, x2, y2] = item.box;
+                if (x >= x1 && x <= x2 && y >= y1 && y <= y2) {
+                    selectedResultIndex = originalIndex;
+                    renderResult(currentFile, lastResults);
+                    break;
+                }
+            }
         });
     </script>
 </body>

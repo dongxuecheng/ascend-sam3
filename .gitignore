@@ -4,6 +4,7 @@ kernel_meta/
 aoe_workspace/
 models/onnx-models/
 models/om-models/*.om
+models/om-models/EfficientSAM3/*.om
 third_party/tokenizers-cpp/
 .pytest_cache/
 service/__pycache__
