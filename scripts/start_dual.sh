@@ -15,6 +15,7 @@ fi
 
 DEVICE_A_WORKERS=${SAM3_DEVICE_A_INSTANCES:-1}
 DEVICE_B_WORKERS=${SAM3_DEVICE_B_INSTANCES:-1}
+WORKER_HEALTHCHECK_TIMEOUT=${SAM3_WORKER_HEALTHCHECK_TIMEOUT:-180}
 
 validate_worker_count() {
     local name=$1
@@ -35,9 +36,15 @@ validate_worker_count() {
 validate_worker_count SAM3_DEVICE_A_INSTANCES "${DEVICE_A_WORKERS}"
 validate_worker_count SAM3_DEVICE_B_INSTANCES "${DEVICE_B_WORKERS}"
 
+if [[ ! "${WORKER_HEALTHCHECK_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "SAM3_WORKER_HEALTHCHECK_TIMEOUT must be a positive integer, got: ${WORKER_HEALTHCHECK_TIMEOUT}" >&2
+    exit 2
+fi
+
 echo "Starting SAM3 services:"
 echo "  physical device ${SAM3_DEVICE_A:-2}: one container, ${DEVICE_A_WORKERS} worker(s)"
 echo "  physical device ${SAM3_DEVICE_B:-3}: one container, ${DEVICE_B_WORKERS} worker(s)"
+echo "  Uvicorn worker healthcheck timeout: ${WORKER_HEALTHCHECK_TIMEOUT}s"
 echo "  gateway port: ${SAM3_PUBLIC_PORT:-18000}"
 
 cd "${PROJECT_DIR}"

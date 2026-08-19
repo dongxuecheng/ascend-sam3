@@ -19,7 +19,11 @@ services:
       - /bin/bash
       - -c
       - |
-        exec python3 -m uvicorn service.main:app --host 0.0.0.0 --port 8000 --workers "${SAM3_DEVICE_A_INSTANCES:-1}"
+        exec python3 -m uvicorn service.main:app \
+          --host 0.0.0.0 \
+          --port 8000 \
+          --workers "${SAM3_DEVICE_A_INSTANCES:-1}" \
+          --timeout-worker-healthcheck "${SAM3_WORKER_HEALTHCHECK_TIMEOUT:-180}"
     expose:
       - "8000"
     ipc: host
@@ -64,7 +68,11 @@ services:
       - /bin/bash
       - -c
       - |
-        exec python3 -m uvicorn service.main:app --host 0.0.0.0 --port 8000 --workers "${SAM3_DEVICE_B_INSTANCES:-1}"
+        exec python3 -m uvicorn service.main:app \
+          --host 0.0.0.0 \
+          --port 8000 \
+          --workers "${SAM3_DEVICE_B_INSTANCES:-1}" \
+          --timeout-worker-healthcheck "${SAM3_WORKER_HEALTHCHECK_TIMEOUT:-180}"
     expose:
       - "8000"
     ipc: host

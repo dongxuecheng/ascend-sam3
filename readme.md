@@ -319,8 +319,9 @@ cp -n .env.example .env
 # 旧版 .env 没有实例数字段时补上默认值。
 grep -q '^SAM3_DEVICE_A_INSTANCES=' .env || echo 'SAM3_DEVICE_A_INSTANCES=1' >> .env
 grep -q '^SAM3_DEVICE_B_INSTANCES=' .env || echo 'SAM3_DEVICE_B_INSTANCES=1' >> .env
+grep -q '^SAM3_WORKER_HEALTHCHECK_TIMEOUT=' .env || echo 'SAM3_WORKER_HEALTHCHECK_TIMEOUT=180' >> .env
 
-grep -E 'SAM3_DEVICE_A|SAM3_DEVICE_B|SAM3_DEVICE_A_INSTANCES|SAM3_DEVICE_B_INSTANCES|SAM3_PUBLIC_PORT|SAM3_GATEWAY_IMAGE' .env || true
+grep -E 'SAM3_DEVICE_A|SAM3_DEVICE_B|SAM3_DEVICE_A_INSTANCES|SAM3_DEVICE_B_INSTANCES|SAM3_WORKER_HEALTHCHECK_TIMEOUT|SAM3_PUBLIC_PORT|SAM3_GATEWAY_IMAGE' .env || true
 ```
 
 默认值如下，可根据实际设备号和镜像仓库修改：
@@ -330,6 +331,7 @@ SAM3_DEVICE_A=2
 SAM3_DEVICE_B=3
 SAM3_DEVICE_A_INSTANCES=1
 SAM3_DEVICE_B_INSTANCES=1
+SAM3_WORKER_HEALTHCHECK_TIMEOUT=180
 SAM3_PUBLIC_PORT=18000
 SAM3_GATEWAY_IMAGE=nginx:1.30.4-alpine
 ```
@@ -339,6 +341,13 @@ SAM3_GATEWAY_IMAGE=nginx:1.30.4-alpine
 一套 OM 模型并占用独立 NPU 内存。建议先使用 `1/1` 建立基线，再改为 `2/2`
 测试。启动脚本会拒绝非正整数以及大于 8 的误配置；8 是防误操作保护值，不代表
 硬件建议值。
+
+SAM3 worker 会在 FastAPI startup 阶段同步加载三套 OM 模型。实测单 worker
+初始化约需 28 秒，超过 Uvicorn 多进程管理器默认 5 秒的 worker 健康检查时间。
+`SAM3_WORKER_HEALTHCHECK_TIMEOUT` 会传给
+`uvicorn --timeout-worker-healthcheck`，默认设为 180 秒，以便两个 worker 并发
+加载时留出余量。该值必须是正整数；如果服务器上的实测初始化时间明显更长，可
+继续调大。
 
 构建共享 SAM3 镜像并检查最终配置：
 
