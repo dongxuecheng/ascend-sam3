@@ -294,9 +294,16 @@ Dockerfile 将构建分成 `build-base`、`dependencies`、`builder` 和 `runtim
 ### Docker 多实例统一入口
 
 `docker-compose.dual.yml` 将 `sam3-npu2`、`sam3-npu3` 分别绑定到宿主机
-device 2、device 3。每个服务可以扩展为多个独立 SAM3 进程，Nginx 使用
-`least_conn` 将请求分发到当前连接数较少的实例。所有后端都不暴露宿主机端口；
-客户端始终访问网关的一个端口，接口路径、参数和返回值与单实例完全相同。
+device 2、device 3。每个 Device 固定只创建一个容器，容器内部由 Uvicorn
+启动一个或多个独立 SAM3 worker 进程。Nginx 使用 `least_conn` 在两个 Device
+容器之间分流，容器内再由 Uvicorn 将连接交给 worker。所有后端都不暴露宿主机
+端口；客户端始终访问网关的一个端口，接口路径、参数和返回值与单实例完全相同。
+
+Ascend UDA 驱动不允许两个不同的容器 namespace 同时打开同一个物理 Device；
+这种配置会在内核日志中出现 `Conflict open udevid`，并使第二个容器的
+`aclInit()` 返回 `500000`。因此 `scripts/start_dual.sh` 会把两个 Compose 服务的
+容器副本数强制固定为 1，`.env` 中的实例数只控制容器内部 worker，不能用于
+扩展共享同一 Device 的容器。
 
 每个后端容器只映射一个 `/dev/davinciN`，容器内可见设备会重新编号为 0，
 所以所有实例均使用 `ASCEND_DEVICE_ID=0`。不要增加
@@ -327,9 +334,11 @@ SAM3_PUBLIC_PORT=18000
 SAM3_GATEWAY_IMAGE=nginx:1.30.4-alpine
 ```
 
-`SAM3_DEVICE_A_INSTANCES`、`SAM3_DEVICE_B_INSTANCES` 分别控制两个 device
-上的进程数。建议先使用 `1/1` 建立基线，再改为 `2/2` 测试。启动脚本会拒绝
-非正整数以及大于 8 的误配置；8 是防误操作保护值，不代表硬件建议值。
+`SAM3_DEVICE_A_INSTANCES`、`SAM3_DEVICE_B_INSTANCES` 分别控制两个 Device
+容器内部的 Uvicorn/SAM3 worker 数。每个 worker 都会独立执行 `aclInit()`、加载
+一套 OM 模型并占用独立 NPU 内存。建议先使用 `1/1` 建立基线，再改为 `2/2`
+测试。启动脚本会拒绝非正整数以及大于 8 的误配置；8 是防误操作保护值，不代表
+硬件建议值。
 
 构建共享 SAM3 镜像并检查最终配置：
 
@@ -344,8 +353,8 @@ docker-compose -f docker-compose.dual.yml config
 `SAM3_GATEWAY_IMAGE` 指定完整镜像地址。
 
 当前单实例占用了 device 2 和端口 18000，切换时先停止旧编排，再通过启动脚本
-按 `.env` 中的实例数启动多实例编排。docker-compose 1.22 不支持使用
-`deploy.replicas` 控制普通 Compose 部署，因此实例数由脚本转换为 `--scale` 参数：
+启动两个 Device 容器。实例数会写入各容器的 `SAM3_WORKERS`，并转换为
+`uvicorn --workers N`；Compose 容器副本数始终固定为 `1/1`：
 
 ```bash
 # openEuler 上如果 firewalld 未自动创建 Docker zone，先持久化固定网桥名。
@@ -365,14 +374,17 @@ docker-compose -f docker-compose.dual.yml ps
 或 Compose 重建网络后，永久 firewalld 规则仍然匹配。重复执行
 `--add-interface` 如果返回 `ALREADY_ENABLED`，表示规则已经存在，可继续后续步骤。
 
-如果服务器已经运行过使用随机 `br-<network-id>` 的旧版双实例配置，更新本文件
-后使用下面的命令迁移；该操作只重建 SAM3 三个容器和项目网络，不会重启 Docker：
+如果服务器已经运行过旧版“同一 Device 扩展多个容器”的配置，必须先执行
+`down`，让健康容器和反复重启的冲突容器全部释放 Device，再迁移到单容器多
+worker。由于 worker PID 响应头来自更新后的 Python 服务，本次需要重新构建一次
+SAM3 镜像；第三方依赖层没有变化时会直接复用构建缓存：
 
 ```bash
 firewall-cmd --permanent --zone=trusted --add-interface=br-sam3
 
+docker-compose -f docker-compose.dual.yml build sam3-npu2
 docker-compose -f docker-compose.dual.yml down --remove-orphans
-bash scripts/start_dual.sh --force-recreate
+bash scripts/start_dual.sh
 
 firewall-cmd --zone=trusted --add-interface=br-sam3
 ```
@@ -391,13 +403,26 @@ docker-compose -f docker-compose.dual.yml logs --tail=100 sam3-npu2 sam3-npu3
 npu-smi info
 ```
 
-后端为了支持扩容不再设置固定 `container_name`，Compose 会自动生成带序号的
-容器名。下面的命令可分别确认实际副本数：
+Compose 会自动生成带序号的后端容器名。下面两个结果都必须是 `1`；大于 1
+说明仍残留旧版的同 Device 多容器配置：
 
 ```bash
 docker-compose -f docker-compose.dual.yml ps -q sam3-npu2 | wc -l
 docker-compose -f docker-compose.dual.yml ps -q sam3-npu3 | wc -l
 ```
+
+检查容器内进程以及各 worker 的模型加载日志：
+
+```bash
+docker top $(docker-compose -f docker-compose.dual.yml ps -q sam3-npu2)
+docker top $(docker-compose -f docker-compose.dual.yml ps -q sam3-npu3)
+
+docker-compose -f docker-compose.dual.yml logs --tail=200 sam3-npu2 sam3-npu3 \
+  | grep -E 'Started parent process|Started server process|SAM3 worker ready|aclInit failed'
+```
+
+每个成功 worker 都会输出一条 `SAM3 worker ready`。`npu-smi info` 中 device 2、
+device 3 下的 SAM3 `python3` 进程数也应分别等于 `.env` 中配置的数量。
 
 首页只注册了 `GET /`，所以 `curl -I` 发送 `HEAD /` 时返回 405 属于正常现象。
 应使用 GET 检查首页：
@@ -406,22 +431,25 @@ docker-compose -f docker-compose.dual.yml ps -q sam3-npu3 | wc -l
 curl -sS -D - -o /dev/null http://127.0.0.1:18000/
 ```
 
-网关会在响应中增加仅供运维排查的 `X-SAM3-Upstream`，连续检查可以看到实际
-处理请求的后端地址；业务客户端不需要读取这个响应头：
+网关会在响应中增加 `X-SAM3-Upstream`，Python 服务增加
+`X-SAM3-Worker-PID`。前者用于区分 Device 容器，后者用于区分容器内 worker；
+业务客户端不需要依赖这些运维响应头：
 
 ```bash
 for i in 1 2 3 4; do
   curl -sS -D - -o /dev/null http://127.0.0.1:18000/health \
-    | grep -i '^X-SAM3-Upstream:'
+    | grep -Ei '^X-SAM3-(Upstream|Worker-PID):'
 done
 ```
 
-所有后端分别设置了健康检查和自动重启。Nginx 对连接失败、超时以及
+两个 Device 容器分别设置了健康检查和自动重启，Uvicorn 主进程负责管理和
+重启容器内 worker。Nginx 对连接失败、超时以及
 502/503/504 最多尝试两个后端；检测 POST 请求没有写入副作用，因此允许故障
-重试。Docker 内置 DNS 会把同一服务名解析为该服务的多个副本地址，并定期刷新；
-后端扩缩容或容器重建后不需要手工修改 Nginx 配置。
+重试。Docker 内置 DNS 会定期刷新两个服务容器的地址；容器重建后不需要手工
+修改 Nginx 配置。
 
-需要更新 SAM3 镜像时，只构建一次，然后按 `.env` 的副本数重建后端和网关：
+需要更新 SAM3 镜像时，只构建一次，然后按 `.env` 的 worker 数重建两个后端
+容器和网关：
 
 ```bash
 docker-compose -f docker-compose.dual.yml build sam3-npu2
@@ -444,8 +472,8 @@ docker-compose up -d --no-build
 
 `scripts/benchmark_service.py` 使用 Python 标准库并发上传 `test-images` 目录下
 所有 jpg/jpeg/png/bmp/webp 图片，输出总耗时、吞吐、平均/p50/p95/p99 延迟和
-Nginx 实际后端分布。预热请求不计入结果，图片会在计时前读入内存，因此统计值
-主要反映 HTTP 和推理耗时。
+Nginx 实际 Device 容器及 worker PID 分布。预热请求不计入结果，图片会在计时
+前读入内存，因此统计值主要反映 HTTP 和推理耗时。
 
 先测试每个 device 一个实例：
 
@@ -474,7 +502,7 @@ sed -i 's/^SAM3_DEVICE_A_INSTANCES=.*/SAM3_DEVICE_A_INSTANCES=2/' .env
 sed -i 's/^SAM3_DEVICE_B_INSTANCES=.*/SAM3_DEVICE_B_INSTANCES=2/' .env
 bash scripts/start_dual.sh --force-recreate
 
-curl -fsS http://127.0.0.1:18000/health
+until curl -fsS http://127.0.0.1:18000/health; do sleep 2; done
 python3 scripts/benchmark_service.py \
   --images test-images \
   --concurrency 4 \
@@ -499,8 +527,10 @@ python3 scripts/benchmark_service.py \
 ```
 
 比较两个 JSON/终端结果时，优先看 `throughput_images_per_second`、p95 延迟、
-失败数和 `upstream_counts`。并发数应至少等于总实例数；如果图片只有十几张，
-使用 `--rounds 3` 或更高可降低偶然波动。压测期间同时执行
+失败数、`upstream_counts` 和 `worker_counts`。`upstream_counts` 在两种配置下
+通常都只有两个容器 IP；配置为 `2/2` 时，`worker_counts` 应出现四个“容器 IP +
+PID”组合，表明四个模型进程均收到请求。并发数应至少等于总 worker 数；如果
+图片只有十几张，使用 `--rounds 3` 或更高可降低偶然波动。压测期间同时执行
 `watch -n 1 npu-smi info`，确认没有显存耗尽、温度降频或实例启动失败。建议
 每组测试重复三次并取中位数。
 

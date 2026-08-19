@@ -13,10 +13,10 @@ if [[ -f "${ENV_FILE}" ]]; then
     set +a
 fi
 
-DEVICE_A_INSTANCES=${SAM3_DEVICE_A_INSTANCES:-1}
-DEVICE_B_INSTANCES=${SAM3_DEVICE_B_INSTANCES:-1}
+DEVICE_A_WORKERS=${SAM3_DEVICE_A_INSTANCES:-1}
+DEVICE_B_WORKERS=${SAM3_DEVICE_B_INSTANCES:-1}
 
-validate_instance_count() {
+validate_worker_count() {
     local name=$1
     local value=$2
 
@@ -32,21 +32,24 @@ validate_instance_count() {
     fi
 }
 
-validate_instance_count SAM3_DEVICE_A_INSTANCES "${DEVICE_A_INSTANCES}"
-validate_instance_count SAM3_DEVICE_B_INSTANCES "${DEVICE_B_INSTANCES}"
+validate_worker_count SAM3_DEVICE_A_INSTANCES "${DEVICE_A_WORKERS}"
+validate_worker_count SAM3_DEVICE_B_INSTANCES "${DEVICE_B_WORKERS}"
 
 echo "Starting SAM3 services:"
-echo "  physical device ${SAM3_DEVICE_A:-2}: ${DEVICE_A_INSTANCES} instance(s)"
-echo "  physical device ${SAM3_DEVICE_B:-3}: ${DEVICE_B_INSTANCES} instance(s)"
+echo "  physical device ${SAM3_DEVICE_A:-2}: one container, ${DEVICE_A_WORKERS} worker(s)"
+echo "  physical device ${SAM3_DEVICE_B:-3}: one container, ${DEVICE_B_WORKERS} worker(s)"
 echo "  gateway port: ${SAM3_PUBLIC_PORT:-18000}"
 
 cd "${PROJECT_DIR}"
 
 # 额外参数会原样传给 `docker-compose up`，例如：
 #   bash scripts/start_dual.sh --force-recreate
+#
+# 两个 scale 值必须固定为 1。Ascend UDA 要求一个物理 Device 同时只能属于
+# 一个容器 namespace；并发进程数由容器内的 SAM3_WORKERS 控制。
 docker-compose -f "${COMPOSE_FILE}" up -d --no-build \
     "$@" \
-    --scale "sam3-npu2=${DEVICE_A_INSTANCES}" \
-    --scale "sam3-npu3=${DEVICE_B_INSTANCES}"
+    --scale "sam3-npu2=1" \
+    --scale "sam3-npu3=1"
 
 docker-compose -f "${COMPOSE_FILE}" ps

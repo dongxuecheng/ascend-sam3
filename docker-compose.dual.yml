@@ -1,9 +1,10 @@
 version: "2.3"
 
-# Atlas 300I Duo 多实例部署：sam3-npu2、sam3-npu3 分别绑定一颗逻辑
-# NPU，每个服务可通过 scripts/start_dual.sh 扩展为多个独立进程。Nginx
-# 对外提供唯一入口。不要设置 ASCEND_RT_VISIBLE_DEVICES；devices 已将每个
-# 后端限制为单个物理设备，容器内统一使用逻辑 device 0。
+# Atlas 300I Duo 多进程部署：sam3-npu2、sam3-npu3 分别绑定一颗逻辑
+# NPU，每颗 NPU 始终只对应一个容器，容器内通过 Uvicorn workers 启动多个
+# 独立 SAM3 进程。Ascend UDA 不允许不同容器 namespace 同时打开同一 Device，
+# 因此不要把这两个服务扩展为多个容器。Nginx 对外提供唯一入口。
+# 不要设置 ASCEND_RT_VISIBLE_DEVICES；容器内统一使用逻辑 device 0。
 services:
   sam3-npu2:
     build:
@@ -14,7 +15,11 @@ services:
         TOKENIZERS_GIT_REPOSITORY: ${TOKENIZERS_GIT_REPOSITORY:-https://github.com/mlc-ai/tokenizers-cpp.git}
         ABSEIL_GIT_REPOSITORY: ${ABSEIL_GIT_REPOSITORY:-https://github.com/abseil/abseil-cpp.git}
     image: ascend-sam3-service:latest
-    # 可伸缩服务不能设置 container_name，否则 Compose 无法创建多个副本。
+    command:
+      - /bin/bash
+      - -c
+      - |
+        exec python3 -m uvicorn service.main:app --host 0.0.0.0 --port 8000 --workers "${SAM3_DEVICE_A_INSTANCES:-1}"
     expose:
       - "8000"
     ipc: host
@@ -25,6 +30,7 @@ services:
       - /etc/ascend_install.info:/etc/ascend_install.info:ro
     environment:
       ASCEND_DEVICE_ID: "0"
+      SAM3_WORKERS: "${SAM3_DEVICE_A_INSTANCES:-1}"
       VISION_MODEL: models/om-models/vision-encoder.om
       TEXT_MODEL: models/om-models/text-encoder.om
       DECODER_MODEL: models/om-models/decoder_static.om
@@ -42,6 +48,7 @@ services:
       retries: 3
       start_period: 120s
     restart: unless-stopped
+    stop_grace_period: 120s
     logging:
       driver: json-file
       options:
@@ -53,7 +60,11 @@ services:
   sam3-npu3:
     # 与 sam3-npu2 共用已经构建好的镜像，避免重复执行镜像构建。
     image: ascend-sam3-service:latest
-    # 可伸缩服务不能设置 container_name，否则 Compose 无法创建多个副本。
+    command:
+      - /bin/bash
+      - -c
+      - |
+        exec python3 -m uvicorn service.main:app --host 0.0.0.0 --port 8000 --workers "${SAM3_DEVICE_B_INSTANCES:-1}"
     expose:
       - "8000"
     ipc: host
@@ -64,6 +75,7 @@ services:
       - /etc/ascend_install.info:/etc/ascend_install.info:ro
     environment:
       ASCEND_DEVICE_ID: "0"
+      SAM3_WORKERS: "${SAM3_DEVICE_B_INSTANCES:-1}"
       VISION_MODEL: models/om-models/vision-encoder.om
       TEXT_MODEL: models/om-models/text-encoder.om
       DECODER_MODEL: models/om-models/decoder_static.om
@@ -81,6 +93,7 @@ services:
       retries: 3
       start_period: 120s
     restart: unless-stopped
+    stop_grace_period: 120s
     logging:
       driver: json-file
       options:

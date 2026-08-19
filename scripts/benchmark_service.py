@@ -42,6 +42,7 @@ class RequestResult:
     status: int
     elapsed_seconds: float
     upstream: str
+    worker_pid: str = ""
     error: str = ""
 
     @property
@@ -196,6 +197,7 @@ def execute_request(
                 status=response.status,
                 elapsed_seconds=elapsed,
                 upstream=response.headers.get("X-SAM3-Upstream", "direct"),
+                worker_pid=response.headers.get("X-SAM3-Worker-PID", ""),
             )
     except urllib.error.HTTPError as exc:
         detail = exc.read(512).decode("utf-8", errors="replace")
@@ -204,6 +206,9 @@ def execute_request(
             status=exc.code,
             elapsed_seconds=time.perf_counter() - started,
             upstream=exc.headers.get("X-SAM3-Upstream", "") if exc.headers else "",
+            worker_pid=(
+                exc.headers.get("X-SAM3-Worker-PID", "") if exc.headers else ""
+            ),
             error=detail or str(exc),
         )
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -212,6 +217,7 @@ def execute_request(
             status=0,
             elapsed_seconds=time.perf_counter() - started,
             upstream="",
+            worker_pid="",
             error=str(exc),
         )
 
@@ -242,6 +248,10 @@ def make_summary(
     upstream_counts = Counter(
         result.upstream or "unknown" for result in successful
     )
+    worker_counts = Counter(
+        f"{result.upstream or 'unknown'} pid={result.worker_pid or 'unknown'}"
+        for result in successful
+    )
 
     summary = {
         "label": args.label,
@@ -268,6 +278,7 @@ def make_summary(
             "max": max(latencies) if latencies else 0.0,
         },
         "upstream_counts": dict(sorted(upstream_counts.items())),
+        "worker_counts": dict(sorted(worker_counts.items())),
     }
     return summary
 
@@ -294,6 +305,9 @@ def print_summary(summary: dict) -> None:
     print("upstreams:")
     for upstream, count in summary["upstream_counts"].items():
         print(f"  {upstream}: {count}")
+    print("workers:")
+    for worker, count in summary["worker_counts"].items():
+        print(f"  {worker}: {count}")
 
 
 def write_json_report(

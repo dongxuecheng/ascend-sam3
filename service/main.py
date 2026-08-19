@@ -24,7 +24,7 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -39,6 +39,14 @@ if BUILD_DIR not in sys.path:
 import ascendsam3
 
 app = FastAPI(title="SAM3 Ascend Inference Service", version="1.1.0")
+
+
+@app.middleware("http")
+async def add_worker_identity(request: Request, call_next):
+    """Expose the serving process so multi-worker balancing can be verified."""
+    response = await call_next(request)
+    response.headers["X-SAM3-Worker-PID"] = str(os.getpid())
+    return response
 
 # 挂载静态文件目录，前端页面放在 service/static/
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -160,13 +168,23 @@ def _detect(image_bytes: bytes, class_names: List[str], confidence: float, retur
 def startup():
     # 服务启动时预热加载模型
     _load_model()
+    print(
+        f"SAM3 worker ready: pid={os.getpid()}, "
+        f"configured_workers={os.getenv('SAM3_WORKERS', '1')}",
+        flush=True,
+    )
 
 
 @app.get("/health")
 def health():
     try:
         _load_model()
-        return {"status": "ok", "device_id": int(os.getenv("ASCEND_DEVICE_ID", "0"))}
+        return {
+            "status": "ok",
+            "device_id": int(os.getenv("ASCEND_DEVICE_ID", "0")),
+            "worker_pid": os.getpid(),
+            "configured_workers": int(os.getenv("SAM3_WORKERS", "1")),
+        }
     except Exception as e:
         return JSONResponse(status_code=503, content={"status": "unhealthy", "error": str(e)})
 
