@@ -15,7 +15,7 @@ if [ -f "${PROJECT_ROOT}/.env" ]; then
     set +a
 fi
 SOC_VERSION="${SOC_VERSION:-Ascend310P3}"
-DEVICE_ID="${ASCEND_DEVICE_ID:-${DEVICE_ID:-2}}"
+PHYSICAL_DEVICE_ID="${ASCEND_PHYSICAL_DEVICE_ID:-${DEVICE_ID:-2}}"
 FORCE="${FORCE:-0}"
 
 IMAGE="${CANN_IMAGE:-swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-310p-ubuntu22.04-py3.11}"
@@ -24,7 +24,7 @@ MODEL_DIR="/app/models"
 echo "======================================"
 echo "AOE 调优环境：Docker + ${IMAGE}"
 echo "目标 SOC：${SOC_VERSION}"
-echo "使用物理 Device ID：${DEVICE_ID}"
+echo "使用物理 Device ID：${PHYSICAL_DEVICE_ID}"
 echo "项目目录：${PROJECT_ROOT}"
 echo "======================================"
 
@@ -36,7 +36,7 @@ for model in vision-encoder decoder_static; do
     fi
 done
 
-DEVICE_PATH="/dev/davinci${DEVICE_ID}"
+DEVICE_PATH="/dev/davinci${PHYSICAL_DEVICE_ID}"
 if [ ! -e "${DEVICE_PATH}" ]; then
     echo "错误：${DEVICE_PATH} 不存在"
     exit 1
@@ -49,7 +49,8 @@ DOCKER_ARGS=(
     --device /dev/devmm_svm:/dev/devmm_svm
     --device /dev/hisi_hdc:/dev/hisi_hdc
     --ipc=host
-    -e ASCEND_DEVICE_ID="${DEVICE_ID}"
+    -e ASCEND_RT_VISIBLE_DEVICES="${PHYSICAL_DEVICE_ID}"
+    -e ASCEND_DEVICE_ID=0
     -v "${PROJECT_ROOT}:/app"
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
 )

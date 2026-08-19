@@ -270,7 +270,7 @@ python3 -m uvicorn service.main:app --host 0.0.0.0 --port 8000
 ### Docker 部署
 
 ```bash
-# 默认配置使用物理 device 2 和端口 18000，可在 .env 中覆盖。
+# 默认配置使用物理 device 2、容器内逻辑 device 0 和端口 18000，可在 .env 中覆盖。
 cp .env.example .env
 
 # 先转换出 vision-encoder.om、text-encoder.om、decoder_static.om
@@ -282,9 +282,9 @@ docker-compose config
 docker-compose up -d --no-build
 ```
 
-模型目录通过 `docker-compose.yml` 只读挂载。容器不使用 `privileged`，默认只映射 `/dev/davinci2`；应用通过 `ASCEND_DEVICE_ID` 选择相同的物理 Device ID。
+模型目录通过 `docker-compose.yml` 只读挂载。容器不使用 `privileged`，默认只映射物理 `/dev/davinci2`；`ASCEND_RT_VISIBLE_DEVICES=2` 将当前进程限制在该卡上，单卡可见后应用使用容器内索引 `ASCEND_DEVICE_ID=0`。
 
-如需在空闲的 device 3 启动第二实例，请使用独立 Compose project、端口和镜像容器名；不要让两个实例使用同一 Device ID。
+如需在空闲的物理 device 3 启动第二实例，请使用独立 Compose project、端口和镜像容器名，并设置 `ASCEND_PHYSICAL_DEVICE_ID=3`；单卡容器内仍使用 `ASCEND_LOGICAL_DEVICE_ID=0`。
 
 ### 调用示例
 

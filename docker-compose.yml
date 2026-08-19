@@ -10,7 +10,7 @@ services:
         TOKENIZERS_GIT_REPOSITORY: ${TOKENIZERS_GIT_REPOSITORY:-https://github.com/mlc-ai/tokenizers-cpp.git}
         ABSEIL_GIT_REPOSITORY: ${ABSEIL_GIT_REPOSITORY:-https://github.com/abseil/abseil-cpp.git}
     image: ascend-sam3-service:latest
-    container_name: sam3-service-npu${ASCEND_DEVICE_ID:-2}
+    container_name: sam3-service-npu${ASCEND_PHYSICAL_DEVICE_ID:-2}
     ports:
       - "${SAM3_PORT:-18000}:8000"
     ipc: host
@@ -20,15 +20,17 @@ services:
       - /usr/local/Ascend/develop:/usr/local/Ascend/develop:ro
       - /etc/ascend_install.info:/etc/ascend_install.info:ro
     environment:
-      ASCEND_DEVICE_ID: "${ASCEND_DEVICE_ID:-2}"
+      # 物理 device 2 是当前进程唯一可见的设备，并映射为容器内索引 0。
+      ASCEND_RT_VISIBLE_DEVICES: "${ASCEND_PHYSICAL_DEVICE_ID:-2}"
+      ASCEND_DEVICE_ID: "${ASCEND_LOGICAL_DEVICE_ID:-0}"
       VISION_MODEL: models/om-models/vision-encoder.om
       TEXT_MODEL: models/om-models/text-encoder.om
       DECODER_MODEL: models/om-models/decoder_static.om
       FPN_POS2: models/om-models/fpn_pos_2_constant.npy
       TOKENIZER: models/onnx-models/tokenizer.json
-    # 不使用 privileged，确保容器无法访问 VLLM 正在使用的 device 0/1。
+    # 不使用 privileged，确保容器无法访问 VLLM 正在使用的物理 device 0/1。
     devices:
-      - /dev/davinci${ASCEND_DEVICE_ID:-2}:/dev/davinci${ASCEND_DEVICE_ID:-2}
+      - /dev/davinci${ASCEND_PHYSICAL_DEVICE_ID:-2}:/dev/davinci${ASCEND_PHYSICAL_DEVICE_ID:-2}
       - /dev/davinci_manager:/dev/davinci_manager
       - /dev/devmm_svm:/dev/devmm_svm
       - /dev/hisi_hdc:/dev/hisi_hdc
