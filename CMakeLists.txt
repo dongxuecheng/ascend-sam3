@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.19)
 project(ascend-sam3 CXX)
 
+option(SAM3_DEPENDENCIES_ONLY "Only configure and build third-party dependencies" OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -77,13 +79,6 @@ set(INFER_SRC
     src/infer/sam3infer.cpp
 )
 
-add_library(ascendsam3 STATIC ${COMMON_SRC} ${INFER_SRC})
-# 静态 OpenCV 时需要额外链接 3rdparty；动态 OpenCV 时此目录可能不存在
-file(GLOB OPENCV_3RDPARTY_LIBS "${OPENCV_CUSTOM_DIR}/lib/opencv4/3rdparty/*.a")
-if(NOT OPENCV_3RDPARTY_LIBS)
-    set(OPENCV_3RDPARTY_LIBS "")
-endif()
-
 # tokenizers-cpp 支持
 # 当前环境是本机 aarch64，tokenizers-cpp 默认使用交叉编译前缀的工具名。
 # 在本机构建场景下没有 aarch64-unknown-linux-gnu-gcc，因此创建一个工具链目录，
@@ -135,6 +130,21 @@ else()
     FetchContent_MakeAvailable(tokenizers-cpp)
 endif()
 list(APPEND EXTRA_LIBS tokenizers_cpp)
+
+# Docker 依赖缓存阶段只构建 tokenizers_cpp 及其 Rust、SentencePiece、
+# Abseil 依赖。依赖 build tree 会被后续业务构建阶段复用；src/ 变化时
+# 不会重新执行这些耗时目标。
+if(SAM3_DEPENDENCIES_ONLY)
+    message(STATUS "SAM3 dependency-only configuration enabled")
+    return()
+endif()
+
+add_library(ascendsam3 STATIC ${COMMON_SRC} ${INFER_SRC})
+# 静态 OpenCV 时需要额外链接 3rdparty；动态 OpenCV 时此目录可能不存在
+file(GLOB OPENCV_3RDPARTY_LIBS "${OPENCV_CUSTOM_DIR}/lib/opencv4/3rdparty/*.a")
+if(NOT OPENCV_3RDPARTY_LIBS)
+    set(OPENCV_3RDPARTY_LIBS "")
+endif()
 
 # 当前实现只调用 AscendCL/ACL Runtime API；mask 后处理走 ACL memcpy +
 # OpenCV，不直接调用 aclnn。仅链接实际使用的库，避免 CANN 版本变化时因

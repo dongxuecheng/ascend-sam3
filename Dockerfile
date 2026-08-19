@@ -7,7 +7,7 @@
 #   ABSEIL_GIT_REPOSITORY:     abseil-cpp 仓库地址
 
 ARG CANN_IMAGE=swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-310p-ubuntu22.04-py3.11
-FROM ${CANN_IMAGE} AS builder
+FROM ${CANN_IMAGE} AS build-base
 
 ARG TOKENIZERS_GIT_REPOSITORY=https://github.com/mlc-ai/tokenizers-cpp.git
 ARG ABSEIL_GIT_REPOSITORY=https://github.com/abseil/abseil-cpp.git
@@ -45,11 +45,16 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://mirrors.ustc.edu.cn/rust-static
 RUN pip3 config set global.index-url https://mirrors.ustc.edu.cn/pypi/web/simple && \
     pip3 install --no-cache-dir pybind11==2.12.0
 
-# 仅复制构建 C++ 库所需的文件，避免 service/、readme 等变更触发重新编译。
-# tokenizers-cpp 及其 git 子模块已经由宿主机初始化，构建时一并复制。
+# ------------------------------------------------------------------------------
+# 第三方依赖阶段
+#
+# 此阶段的缓存键只包含 CMakeLists.txt 与 third_party/。业务 src/ 变化不会
+# 使 Rust tokenizers、SentencePiece 和 Abseil 失效。后续 builder 直接继承
+# 此阶段的 /app/build，继续在同一个 CMake build tree 中构建业务代码。
+FROM build-base AS dependencies
+
 WORKDIR /app
 COPY CMakeLists.txt /app/
-COPY src /app/src
 COPY third_party /app/third_party
 
 # SentencePiece 默认在 CMake 配置阶段从 GitHub 完整克隆 Abseil。改写其
@@ -63,20 +68,40 @@ RUN sed -i \
     grep -F 'GIT_TAG 20260107.1 GIT_SHALLOW TRUE)' \
         /app/third_party/tokenizers-cpp/sentencepiece/CMakeLists.txt
 
-# 不依赖 BuildKit 的 RUN --mount，兼容服务器上的 Docker 18.09 / Compose 1.22。
-RUN mkdir -p /app/build && cd /app/build && \
+# 不依赖 BuildKit 的 RUN --mount，兼容 Docker 18.09 / Compose 1.22。
+# 显式设置 CARGO_BUILD_JOBS，避免 Cargo 无法继承 GNU Make jobserver 时退化。
+RUN BUILD_JOBS=$(nproc) && \
+    cmake -S /app -B /app/build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DSAM3_DEPENDENCIES_ONLY=ON \
+          -DTOKENIZERS_GIT_REPOSITORY=$TOKENIZERS_GIT_REPOSITORY \
+          -DSPM_ABSL_GIT_REPOSITORY=$ABSEIL_GIT_REPOSITORY && \
+    CARGO_BUILD_JOBS=$BUILD_JOBS \
+    cmake --build /app/build --target tokenizers_cpp --parallel $BUILD_JOBS
+
+# ------------------------------------------------------------------------------
+# 业务代码阶段
+#
+# dependencies 阶段未变化时，/app/build 中的第三方静态库直接复用；这里只
+# 复制并编译 src/，因此普通 C++ 改动不再重新下载 crates 或构建 Abseil。
+FROM dependencies AS builder
+
+COPY src /app/src
+
+RUN BUILD_JOBS=$(nproc) && \
     PYBIND11_DIR=$(python3 -m pybind11 --cmakedir) && \
     PYTHON_BIN_DIR=$(python3 -c "import sys, os; print(os.path.dirname(sys.executable))") && \
     export PATH="${PYTHON_BIN_DIR}:${PATH}" && \
-    cmake -Dpybind11_DIR=$PYBIND11_DIR \
+    cmake -S /app -B /app/build \
+          -Dpybind11_DIR=$PYBIND11_DIR \
           -DPYTHON_EXECUTABLE=$(which python3) \
           -DPython_EXECUTABLE=$(which python3) \
           -DPYBIND11_FINDPYTHON=ON \
-          -DTOKENIZERS_GIT_REPOSITORY=$TOKENIZERS_GIT_REPOSITORY \
-          -DABSEIL_GIT_REPOSITORY=$ABSEIL_GIT_REPOSITORY \
           -DSPM_ABSL_GIT_REPOSITORY=$ABSEIL_GIT_REPOSITORY \
-          -DCMAKE_BUILD_TYPE=Release .. && \
-    make -j$(nproc) ascendsam3_py && \
+          -DSAM3_DEPENDENCIES_ONLY=OFF \
+          -DCMAKE_BUILD_TYPE=Release && \
+    CARGO_BUILD_JOBS=$BUILD_JOBS \
+    cmake --build /app/build --target ascendsam3_py --parallel $BUILD_JOBS && \
     cp /app/build/ascendsam3*.so /app/
 
 # ------------------------------------------------------------------------------

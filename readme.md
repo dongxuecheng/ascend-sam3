@@ -283,6 +283,12 @@ docker-compose config
 docker-compose up -d --no-build
 ```
 
+Dockerfile 将构建分成 `build-base`、`dependencies`、`builder` 和 `runtime`
+四个阶段。首次构建仍需完整编译 Rust tokenizers、SentencePiece 和 Abseil；之后
+仅修改 `src/` 时，`docker-compose build` 会复用 `dependencies` 阶段中的
+`/app/build`，只重新编译 SAM3 C++/pybind 代码。修改 `third_party/`、依赖构建
+配置或使用 `--no-cache` 才会重新编译第三方依赖。
+
 模型目录通过 `docker-compose.yml` 只读挂载。容器不使用 `privileged`，默认只映射物理 `/dev/davinci2`；Docker 设备白名单将容器限制在该卡上，单卡可见后应用使用容器内索引 `ASCEND_DEVICE_ID=0`。
 
 如需在空闲的物理 device 3 启动第二实例，请使用独立 Compose project、端口和镜像容器名，并设置 `ASCEND_PHYSICAL_DEVICE_ID=3`；单卡容器内仍使用 `ASCEND_LOGICAL_DEVICE_ID=0`。
