@@ -7,6 +7,6 @@ models/om-models/*.om
 models/om-models/EfficientSAM3/*.om
 third_party/tokenizers-cpp/
 .pytest_cache/
-service/__pycache__
+__pycache__/
 *.json
 .env
