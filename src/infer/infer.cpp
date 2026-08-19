@@ -3,6 +3,7 @@
 #include <acl/acl.h>
 #include <cerrno>
 #include <climits>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <mutex>
@@ -51,7 +52,28 @@ std::shared_ptr<Infer> load(const ModelPaths& paths)
         return nullptr;
     }
 
-    aclError ret = aclrtSetDevice(device_id);
+    uint32_t device_count = 0;
+    aclError ret = aclrtGetDeviceCount(&device_count);
+    if (ret != ACL_SUCCESS)
+    {
+        std::cerr << "aclrtGetDeviceCount failed: " << ret << std::endl;
+        return nullptr;
+    }
+    std::cout << "Visible Ascend device count: " << device_count << std::endl;
+    if (device_count == 0)
+    {
+        std::cerr << "No Ascend device is visible to the process" << std::endl;
+        return nullptr;
+    }
+    if (static_cast<uint32_t>(device_id) >= device_count)
+    {
+        std::cerr << "ASCEND_DEVICE_ID=" << device_id
+                  << " is outside the visible range [0, "
+                  << device_count - 1 << "]" << std::endl;
+        return nullptr;
+    }
+
+    ret = aclrtSetDevice(device_id);
     if (ret != ACL_SUCCESS && ret != ACL_ERROR_REPEAT_INITIALIZE)
     {
         std::cerr << "aclrtSetDevice(" << device_id << ") failed: " << ret << std::endl;

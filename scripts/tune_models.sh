@@ -49,7 +49,6 @@ DOCKER_ARGS=(
     --device /dev/devmm_svm:/dev/devmm_svm
     --device /dev/hisi_hdc:/dev/hisi_hdc
     --ipc=host
-    -e ASCEND_RT_VISIBLE_DEVICES="${PHYSICAL_DEVICE_ID}"
     -e ASCEND_DEVICE_ID=0
     -v "${PROJECT_ROOT}:/app"
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro

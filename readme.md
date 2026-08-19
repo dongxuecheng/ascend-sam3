@@ -282,7 +282,7 @@ docker-compose config
 docker-compose up -d --no-build
 ```
 
-模型目录通过 `docker-compose.yml` 只读挂载。容器不使用 `privileged`，默认只映射物理 `/dev/davinci2`；`ASCEND_RT_VISIBLE_DEVICES=2` 将当前进程限制在该卡上，单卡可见后应用使用容器内索引 `ASCEND_DEVICE_ID=0`。
+模型目录通过 `docker-compose.yml` 只读挂载。容器不使用 `privileged`，默认只映射物理 `/dev/davinci2`；Docker 设备白名单将容器限制在该卡上，单卡可见后应用使用容器内索引 `ASCEND_DEVICE_ID=0`。
 
 如需在空闲的物理 device 3 启动第二实例，请使用独立 Compose project、端口和镜像容器名，并设置 `ASCEND_PHYSICAL_DEVICE_ID=3`；单卡容器内仍使用 `ASCEND_LOGICAL_DEVICE_ID=0`。
 
