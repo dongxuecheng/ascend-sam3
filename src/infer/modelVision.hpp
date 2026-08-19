@@ -11,9 +11,10 @@
  * @brief SAM3 Vision Encoder
  *
  * 输入：images [1,3,1008,1008] float32（也兼容 YUV420SP 带 AIPP 的 OM）
- * 输出：fpn_feat_0、fpn_feat_1、fpn_feat_2
+ * 输出：fpn_feat_0、fpn_feat_1、fpn_feat_2；部分导出版本还包含 fpn_pos_2
  *
- * 注意：fpn_pos_2 现在由外部 fpn_pos_2_constant.npy 提供，不再来自 Vision Encoder。
+ * 注意：运行时统一使用外部 fpn_pos_2_constant.npy；Vision Encoder 中可选的
+ * 第四个 fpn_pos_2 输出不会传给 Decoder。
  */
 class VisionModel : public AclModel
 {

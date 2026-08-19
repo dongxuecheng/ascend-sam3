@@ -136,42 +136,80 @@ bool Sam3Infer::initialize()
         return false;
     }
 
-    const std::array<size_t, 3> expected_vision_outputs{
+    const std::array<size_t, 6> expected_decoder_inputs{
         1ULL * 256 * 288 * 288 * sizeof(float),
         1ULL * 256 * 144 * 144 * sizeof(float),
-        1ULL * 256 * 72 * 72 * sizeof(float)};
-    if (vision_model_->input_count() != 1 || vision_model_->output_count() != expected_vision_outputs.size())
-    {
-        std::cerr << "Vision model I/O count mismatch" << std::endl;
-        return false;
-    }
-    for (size_t i = 0; i < expected_vision_outputs.size(); ++i)
-    {
-        if (vision_model_->output_size(i) != expected_vision_outputs[i])
-        {
-            std::cerr << "Vision output " << i << " size mismatch: expect " << expected_vision_outputs[i]
-                      << ", got " << vision_model_->output_size(i) << std::endl;
-            return false;
-        }
-    }
-
-    if (text_model_->input_count() != 2 || text_model_->output_count() != 2 ||
-        text_model_->output_size(0) != 1ULL * TEXT_LENGTH * TEXT_DIM * sizeof(float))
-    {
-        std::cerr << "Text model I/O layout mismatch" << std::endl;
-        return false;
-    }
+        1ULL * 256 * 72 * 72 * sizeof(float),
+        1ULL * 256 * 72 * 72 * sizeof(float),
+        1ULL * TEXT_LENGTH * TEXT_DIM * sizeof(float),
+        1ULL * TEXT_LENGTH * sizeof(bool)};
 
     const std::array<size_t, 4> expected_decoder_outputs{
         1ULL * MAX_MASKS * MASK_SIZE * MASK_SIZE * sizeof(float),
         1ULL * MAX_MASKS * 4 * sizeof(float),
         1ULL * MAX_MASKS * sizeof(float),
         sizeof(float)};
-    if (decoder_model_->input_count() != 6 || decoder_model_->output_count() != expected_decoder_outputs.size())
+
+    if (decoder_model_->input_count() != expected_decoder_inputs.size() ||
+        decoder_model_->output_count() != expected_decoder_outputs.size())
     {
-        std::cerr << "Decoder model I/O count mismatch" << std::endl;
+        std::cerr << "Decoder model I/O count mismatch: expected " << expected_decoder_inputs.size()
+                  << " inputs and " << expected_decoder_outputs.size() << " outputs, got "
+                  << decoder_model_->input_count() << " input(s) and " << decoder_model_->output_count()
+                  << " output(s)" << std::endl;
         return false;
     }
+    for (size_t i = 0; i < expected_decoder_inputs.size(); ++i)
+    {
+        if (decoder_model_->input_size(i) != expected_decoder_inputs[i])
+        {
+            std::cerr << "Decoder input " << i << " size mismatch: expect " << expected_decoder_inputs[i]
+                      << ", got " << decoder_model_->input_size(i) << std::endl;
+            return false;
+        }
+    }
+
+    const uint32_t vision_output_count = vision_model_->output_count();
+    if (vision_model_->input_count() != 1 ||
+        (vision_output_count != 3 && vision_output_count != 4))
+    {
+        std::cerr << "Vision model I/O count mismatch: expected 1 input and 3 or 4 outputs, got "
+                  << vision_model_->input_count() << " input(s) and " << vision_output_count << " output(s)"
+                  << std::endl;
+        return false;
+    }
+    for (size_t i = 0; i < 3; ++i)
+    {
+        // fpn_feat_0/1 keep symbolic spatial dimensions in some ONNX exports.
+        // ATC therefore reports a maximum output-buffer capacity that can be
+        // larger than the fixed logical tensor consumed by the Decoder.
+        const size_t required_size = decoder_model_->input_size(i);
+        if (vision_model_->output_size(i) < required_size)
+        {
+            std::cerr << "Vision output " << i << " buffer is too small: Decoder requires " << required_size
+                      << " bytes, Vision provides " << vision_model_->output_size(i) << " bytes" << std::endl;
+            return false;
+        }
+    }
+    // Some SAM3 ONNX exports retain fpn_pos_2 as the fourth Vision output.
+    // The runtime intentionally keeps using the external, validated constant .npy
+    // so both the 3-output and 4-output export variants follow the same path.
+    if (vision_output_count == 4 && vision_model_->output_size(3) < decoder_model_->input_size(3))
+    {
+        std::cerr << "Vision output 3 (fpn_pos_2) buffer is too small: Decoder requires "
+                  << decoder_model_->input_size(3) << " bytes, Vision provides " << vision_model_->output_size(3)
+                  << " bytes" << std::endl;
+        return false;
+    }
+
+    if (text_model_->input_count() != 2 || text_model_->output_count() != 2 ||
+        text_model_->output_size(0) != decoder_model_->input_size(4) ||
+        text_model_->output_size(1) != decoder_model_->input_size(5))
+    {
+        std::cerr << "Text model I/O layout mismatch" << std::endl;
+        return false;
+    }
+
     for (size_t i = 0; i < expected_decoder_outputs.size(); ++i)
     {
         if (decoder_model_->output_size(i) != expected_decoder_outputs[i])
@@ -185,6 +223,12 @@ bool Sam3Infer::initialize()
     if (!load_fpn_pos_2())
     {
         std::cerr << "Load fpn_pos_2_constant.npy failed" << std::endl;
+        return false;
+    }
+    if (fpn_pos_2_size_ != decoder_model_->input_size(3))
+    {
+        std::cerr << "fpn_pos_2 size mismatch: Decoder requires " << decoder_model_->input_size(3)
+                  << " bytes, constant provides " << fpn_pos_2_size_ << " bytes" << std::endl;
         return false;
     }
 
@@ -392,9 +436,9 @@ object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
         vision_model_->feature_ptr(1),
         vision_model_->feature_ptr(2)};
     std::array<size_t, 3> vision_sizes{
-        vision_model_->output_size(0),
-        vision_model_->output_size(1),
-        vision_model_->output_size(2)};
+        decoder_model_->input_size(0),
+        decoder_model_->input_size(1),
+        decoder_model_->input_size(2)};
 
     auto process_one = [&](const std::string& class_name,
                            void* text_features, void* text_mask,
