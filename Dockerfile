@@ -51,12 +51,17 @@ WORKDIR /app
 COPY CMakeLists.txt /app/
 COPY src /app/src
 COPY third_party /app/third_party
-COPY patches/sentencepiece-abseil-source.patch /tmp/sentencepiece-abseil-source.patch
 
-# SentencePiece 默认在 CMake 配置阶段从 GitHub 完整克隆 Abseil。应用补丁后可
-# 使用构建参数指定镜像，并对固定版本执行浅克隆，避免国内网络下长时间无输出。
-RUN git -C /app/third_party/tokenizers-cpp/sentencepiece \
-        apply /tmp/sentencepiece-abseil-source.patch
+# SentencePiece 默认在 CMake 配置阶段从 GitHub 完整克隆 Abseil。改写其
+# FetchContent 参数后可指定镜像，并对固定版本执行浅克隆，避免长时间无输出。
+RUN sed -i \
+        -e 's|GIT_REPOSITORY  https://github.com/abseil/abseil-cpp.git|GIT_REPOSITORY  ${SPM_ABSL_GIT_REPOSITORY}|' \
+        -e 's|GIT_TAG 20260107.1)|GIT_TAG 20260107.1 GIT_SHALLOW TRUE)|' \
+        /app/third_party/tokenizers-cpp/sentencepiece/CMakeLists.txt && \
+    grep -F 'GIT_REPOSITORY  ${SPM_ABSL_GIT_REPOSITORY}' \
+        /app/third_party/tokenizers-cpp/sentencepiece/CMakeLists.txt && \
+    grep -F 'GIT_TAG 20260107.1 GIT_SHALLOW TRUE)' \
+        /app/third_party/tokenizers-cpp/sentencepiece/CMakeLists.txt
 
 # 不依赖 BuildKit 的 RUN --mount，兼容服务器上的 Docker 18.09 / Compose 1.22。
 RUN mkdir -p /app/build && cd /app/build && \
