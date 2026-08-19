@@ -38,16 +38,11 @@ mkdir -p "${PROJECT_ROOT}/models/om-models"
 
 DOCKER_ARGS=(
     --rm
-    -e ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
-    -e LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/ascend-toolkit/latest/lib64/plugin/opskernel:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/develop/lib64
     -v "${PROJECT_ROOT}:/app"
 )
-if [ -d "/usr/local/Ascend/driver" ]; then
-    DOCKER_ARGS+=(-v "/usr/local/Ascend/driver:/usr/local/Ascend/driver:ro")
-fi
-if [ -d "/usr/local/Ascend/develop" ]; then
-    DOCKER_ARGS+=(-v "/usr/local/Ascend/develop:/usr/local/Ascend/develop:ro")
-fi
+
+# ATC 是离线编译器，不需要映射 NPU 设备或宿主机驱动。保留 CANN 镜像自带的
+# ASCEND_HOME_PATH/LD_LIBRARY_PATH，尤其是镜像内 Python 与 TBE 所需的 libpython。
 
 run_atc() {
     local name=$1

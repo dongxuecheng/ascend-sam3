@@ -45,12 +45,18 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://mirrors.ustc.edu.cn/rust-static
 RUN pip3 config set global.index-url https://mirrors.ustc.edu.cn/pypi/web/simple && \
     pip3 install --no-cache-dir pybind11==2.12.0
 
-# 仅复制构建 C++ 库所需的文件，避免 service/、readme 等变更触发重新编译
-# third_party/tokenizers-cpp 会在 CMake 中按需拉取，不需要放入镜像上下文
+# 仅复制构建 C++ 库所需的文件，避免 service/、readme 等变更触发重新编译。
+# tokenizers-cpp 及其 git 子模块已经由宿主机初始化，构建时一并复制。
 WORKDIR /app
 COPY CMakeLists.txt /app/
 COPY src /app/src
 COPY third_party /app/third_party
+COPY patches/sentencepiece-abseil-source.patch /tmp/sentencepiece-abseil-source.patch
+
+# SentencePiece 默认在 CMake 配置阶段从 GitHub 完整克隆 Abseil。应用补丁后可
+# 使用构建参数指定镜像，并对固定版本执行浅克隆，避免国内网络下长时间无输出。
+RUN git -C /app/third_party/tokenizers-cpp/sentencepiece \
+        apply /tmp/sentencepiece-abseil-source.patch
 
 # 不依赖 BuildKit 的 RUN --mount，兼容服务器上的 Docker 18.09 / Compose 1.22。
 RUN mkdir -p /app/build && cd /app/build && \
@@ -63,6 +69,7 @@ RUN mkdir -p /app/build && cd /app/build && \
           -DPYBIND11_FINDPYTHON=ON \
           -DTOKENIZERS_GIT_REPOSITORY=$TOKENIZERS_GIT_REPOSITORY \
           -DABSEIL_GIT_REPOSITORY=$ABSEIL_GIT_REPOSITORY \
+          -DSPM_ABSL_GIT_REPOSITORY=$ABSEIL_GIT_REPOSITORY \
           -DCMAKE_BUILD_TYPE=Release .. && \
     make -j$(nproc) ascendsam3_py && \
     cp /app/build/ascendsam3*.so /app/

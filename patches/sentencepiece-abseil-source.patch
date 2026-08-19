@@ -1,0 +1,23 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -166,13 +166,18 @@ if (SPM_DISABLE_EMBEDDED_DATA)
+  install(FILES ${EMBEDDED_DATA_FILES} DESTINATION ${INSTALL_DATADIR})
+ endif()
+ if (SPM_ABSL_PROVIDER STREQUAL "module")
++  if (NOT DEFINED SPM_ABSL_GIT_REPOSITORY)
++    set(SPM_ABSL_GIT_REPOSITORY
++        "https://github.com/abseil/abseil-cpp.git")
++  endif()
+   include(FetchContent)
+   FetchContent_Populate(abseil-cpp
+-        GIT_REPOSITORY  https://github.com/abseil/abseil-cpp.git
++        GIT_REPOSITORY  ${SPM_ABSL_GIT_REPOSITORY}
+         SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/abseil-cpp
+         GIT_PROGRESS TRUE
+-        GIT_TAG 20260107.1)
++        GIT_TAG 20260107.1
++        GIT_SHALLOW TRUE)
+   add_subdirectory(third_party/abseil-cpp)
+   if (NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/absl)
+     file(CREATE_LINK
