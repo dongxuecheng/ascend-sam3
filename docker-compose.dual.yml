@@ -116,3 +116,8 @@ services:
 networks:
   sam3-internal:
     driver: bridge
+    # openEuler 的 firewalld 未自动创建 Docker zone 时，需要按接口名放行
+    # 容器间转发。固定 Linux bridge 名称，避免 Compose 重建网络后随机的
+    # br-<network-id> 变化导致永久 firewalld 规则失效。
+    driver_opts:
+      com.docker.network.bridge.name: br-sam3

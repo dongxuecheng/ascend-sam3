@@ -337,14 +337,41 @@ docker-compose -f docker-compose.dual.yml config
 双实例编排：
 
 ```bash
+# openEuler 上如果 firewalld 未自动创建 Docker zone，先持久化固定网桥名。
+# permanent 配置不会立即修改当前防火墙，也不需要执行 firewall-cmd --reload。
+firewall-cmd --permanent --zone=trusted --add-interface=br-sam3
+
 docker-compose down
 docker-compose -f docker-compose.dual.yml up -d --no-build
+
+# br-sam3 创建后增加立即生效的运行时规则；不要重启 Docker 或 reload firewalld。
+firewall-cmd --zone=trusted --add-interface=br-sam3
+
 docker-compose -f docker-compose.dual.yml ps
+```
+
+`docker-compose.dual.yml` 将 Linux bridge 接口固定为 `br-sam3`，因此服务器重启
+或 Compose 重建网络后，永久 firewalld 规则仍然匹配。重复执行
+`--add-interface` 如果返回 `ALREADY_ENABLED`，表示规则已经存在，可继续后续步骤。
+
+如果服务器已经运行过使用随机 `br-<network-id>` 的旧版双实例配置，更新本文件
+后使用下面的命令迁移；该操作只重建 SAM3 三个容器和项目网络，不会重启 Docker：
+
+```bash
+firewall-cmd --permanent --zone=trusted --add-interface=br-sam3
+
+docker-compose -f docker-compose.dual.yml down --remove-orphans
+docker-compose -f docker-compose.dual.yml up -d --no-build --force-recreate
+
+firewall-cmd --zone=trusted --add-interface=br-sam3
 ```
 
 检查网关、后端和 NPU：
 
 ```bash
+ip -br addr show br-sam3
+firewall-cmd --get-zone-of-interface=br-sam3
+
 curl -fsS http://127.0.0.1:18000/gateway-health
 curl -fsS http://127.0.0.1:18000/health
 
@@ -352,6 +379,13 @@ docker logs --tail=100 sam3-gateway
 docker logs --tail=100 sam3-service-npu2
 docker logs --tail=100 sam3-service-npu3
 npu-smi info
+```
+
+首页只注册了 `GET /`，所以 `curl -I` 发送 `HEAD /` 时返回 405 属于正常现象。
+应使用 GET 检查首页：
+
+```bash
+curl -sS -D - -o /dev/null http://127.0.0.1:18000/
 ```
 
 网关会在响应中增加仅供运维排查的 `X-SAM3-Upstream`，连续检查可以看到实际
