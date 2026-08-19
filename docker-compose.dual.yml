@@ -1,0 +1,118 @@
+version: "2.3"
+
+# Atlas 300I Duo 双实例部署：一颗逻辑 NPU 对应一个 SAM3 进程，
+# Nginx 对外提供唯一入口。不要设置 ASCEND_RT_VISIBLE_DEVICES；devices
+# 已将每个后端限制为单个物理设备，容器内统一使用逻辑 device 0。
+services:
+  sam3-npu2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CANN_IMAGE: ${CANN_IMAGE:-swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-310p-ubuntu22.04-py3.11}
+        TOKENIZERS_GIT_REPOSITORY: ${TOKENIZERS_GIT_REPOSITORY:-https://github.com/mlc-ai/tokenizers-cpp.git}
+        ABSEIL_GIT_REPOSITORY: ${ABSEIL_GIT_REPOSITORY:-https://github.com/abseil/abseil-cpp.git}
+    image: ascend-sam3-service:latest
+    container_name: sam3-service-npu${SAM3_DEVICE_A:-2}
+    expose:
+      - "8000"
+    ipc: host
+    volumes:
+      - ./models:/app/models:ro
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+      - /usr/local/Ascend/develop:/usr/local/Ascend/develop:ro
+      - /etc/ascend_install.info:/etc/ascend_install.info:ro
+    environment:
+      ASCEND_DEVICE_ID: "0"
+      VISION_MODEL: models/om-models/vision-encoder.om
+      TEXT_MODEL: models/om-models/text-encoder.om
+      DECODER_MODEL: models/om-models/decoder_static.om
+      FPN_POS2: models/om-models/fpn_pos_2_constant.npy
+      TOKENIZER: models/onnx-models/tokenizer.json
+    devices:
+      - /dev/davinci${SAM3_DEVICE_A:-2}:/dev/davinci${SAM3_DEVICE_A:-2}
+      - /dev/davinci_manager:/dev/davinci_manager
+      - /dev/devmm_svm:/dev/devmm_svm
+      - /dev/hisi_hdc:/dev/hisi_hdc
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - sam3-internal
+
+  sam3-npu3:
+    # 与 sam3-npu2 共用已经构建好的镜像，避免重复执行镜像构建。
+    image: ascend-sam3-service:latest
+    container_name: sam3-service-npu${SAM3_DEVICE_B:-3}
+    expose:
+      - "8000"
+    ipc: host
+    volumes:
+      - ./models:/app/models:ro
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+      - /usr/local/Ascend/develop:/usr/local/Ascend/develop:ro
+      - /etc/ascend_install.info:/etc/ascend_install.info:ro
+    environment:
+      ASCEND_DEVICE_ID: "0"
+      VISION_MODEL: models/om-models/vision-encoder.om
+      TEXT_MODEL: models/om-models/text-encoder.om
+      DECODER_MODEL: models/om-models/decoder_static.om
+      FPN_POS2: models/om-models/fpn_pos_2_constant.npy
+      TOKENIZER: models/onnx-models/tokenizer.json
+    devices:
+      - /dev/davinci${SAM3_DEVICE_B:-3}:/dev/davinci${SAM3_DEVICE_B:-3}
+      - /dev/davinci_manager:/dev/davinci_manager
+      - /dev/devmm_svm:/dev/devmm_svm
+      - /dev/hisi_hdc:/dev/hisi_hdc
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - sam3-internal
+
+  sam3-gateway:
+    # 1.30.4-alpine 是支持 arm64v8 的 Nginx 官方稳定镜像。
+    image: ${SAM3_GATEWAY_IMAGE:-nginx:1.30.4-alpine}
+    container_name: sam3-gateway
+    ports:
+      - "${SAM3_PUBLIC_PORT:-18000}:8000"
+    volumes:
+      - ./deploy/nginx/sam3.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - sam3-npu2
+      - sam3-npu3
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/gateway-health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - sam3-internal
+
+networks:
+  sam3-internal:
+    driver: bridge

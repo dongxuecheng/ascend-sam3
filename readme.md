@@ -268,7 +268,7 @@ source /home/HwHiAiUser/Ascend/ascend-toolkit/set_env.sh
 python3 -m uvicorn service.main:app --host 0.0.0.0 --port 8000
 ```
 
-### Docker 部署
+### Docker 单实例部署
 
 ```bash
 # 默认配置使用物理 device 2、容器内逻辑 device 0 和端口 18000，可在 .env 中覆盖。
@@ -291,7 +291,101 @@ Dockerfile 将构建分成 `build-base`、`dependencies`、`builder` 和 `runtim
 
 模型目录通过 `docker-compose.yml` 只读挂载。容器不使用 `privileged`，默认只映射物理 `/dev/davinci2`；Docker 设备白名单将容器限制在该卡上，单卡可见后应用使用容器内索引 `ASCEND_DEVICE_ID=0`。
 
-如需在空闲的物理 device 3 启动第二实例，请使用独立 Compose project、端口和镜像容器名，并设置 `ASCEND_PHYSICAL_DEVICE_ID=3`；单卡容器内仍使用 `ASCEND_LOGICAL_DEVICE_ID=0`。
+### Docker 双实例统一入口
+
+`docker-compose.dual.yml` 在宿主机 device 2、device 3 上各启动一个 SAM3
+实例，Nginx 使用 `least_conn` 将请求分发到当前连接数较少的实例。两个后端
+不暴露宿主机端口；客户端始终访问网关的一个端口，接口路径、参数和返回值与
+单实例完全相同。
+
+每个后端容器只映射一个 `/dev/davinciN`，容器内可见设备会重新编号为 0，
+所以两个实例均使用 `ASCEND_DEVICE_ID=0`。不要增加
+`ASCEND_RT_VISIBLE_DEVICES`，否则会同时启用另一套设备过滤逻辑。
+
+首次切换前检查 `.env`。已有 `.env` 不需要覆盖；以下变量即使不存在也会使用
+Compose 文件中的默认值：
+
+```bash
+cd /root/ascend-sam3
+cp -n .env.example .env
+
+grep -E 'SAM3_DEVICE_A|SAM3_DEVICE_B|SAM3_PUBLIC_PORT|SAM3_GATEWAY_IMAGE' .env || true
+```
+
+默认值如下，可根据实际设备号和镜像仓库修改：
+
+```dotenv
+SAM3_DEVICE_A=2
+SAM3_DEVICE_B=3
+SAM3_PUBLIC_PORT=18000
+SAM3_GATEWAY_IMAGE=nginx:1.30.4-alpine
+```
+
+构建共享 SAM3 镜像并检查最终配置：
+
+```bash
+docker-compose -f docker-compose.dual.yml build sam3-npu2
+docker-compose -f docker-compose.dual.yml config
+```
+
+`sam3-npu3` 直接复用 `sam3-npu2` 构建产生的
+`ascend-sam3-service:latest`。网关使用支持 aarch64 的 Nginx 官方镜像；如果
+服务器无法访问 Docker Hub，可先把该镜像同步到内部仓库，再通过
+`SAM3_GATEWAY_IMAGE` 指定完整镜像地址。
+
+当前单实例占用了 device 2、端口 18000 和容器名，切换时先停止旧编排，再启动
+双实例编排：
+
+```bash
+docker-compose down
+docker-compose -f docker-compose.dual.yml up -d --no-build
+docker-compose -f docker-compose.dual.yml ps
+```
+
+检查网关、后端和 NPU：
+
+```bash
+curl -fsS http://127.0.0.1:18000/gateway-health
+curl -fsS http://127.0.0.1:18000/health
+
+docker logs --tail=100 sam3-gateway
+docker logs --tail=100 sam3-service-npu2
+docker logs --tail=100 sam3-service-npu3
+npu-smi info
+```
+
+网关会在响应中增加仅供运维排查的 `X-SAM3-Upstream`，连续检查可以看到实际
+处理请求的后端地址；业务客户端不需要读取这个响应头：
+
+```bash
+for i in 1 2 3 4; do
+  curl -sS -D - -o /dev/null http://127.0.0.1:18000/health \
+    | grep -i '^X-SAM3-Upstream:'
+done
+```
+
+两个后端分别设置了健康检查和自动重启。Nginx 对连接失败、超时以及
+502/503/504 最多尝试两个后端；检测 POST 请求没有写入副作用，因此允许故障
+重试。Docker 内置 DNS 会定期重新解析后端地址，后端容器重建后不需要手工重启
+网关。
+
+需要更新 SAM3 镜像时，只构建一次，然后重建两个后端：
+
+```bash
+docker-compose -f docker-compose.dual.yml build sam3-npu2
+docker-compose -f docker-compose.dual.yml up -d --no-build --force-recreate \
+  sam3-npu2 sam3-npu3
+```
+
+如需回滚到原单实例部署：
+
+```bash
+docker-compose -f docker-compose.dual.yml down
+docker-compose up -d --no-build
+```
+
+双实例提高的是并发吞吐和排队延迟。单个请求仍完整地交给其中一个实例处理；
+只有同时存在多个请求时，device 2、device 3 才会并行执行推理。
 
 ### 调用示例
 
