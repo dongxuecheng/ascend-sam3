@@ -1,43 +1,41 @@
+version: "2.3"
+
 services:
   sam3-service:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        # 可指定 GitHub 镜像地址加速国内构建，例如：
-        # TOKENIZERS_GIT_REPOSITORY: https://gitclone.com/github.com/mlc-ai/tokenizers-cpp.git
-        # ABSEIL_GIT_REPOSITORY: https://gitclone.com/github.com/abseil/abseil-cpp.git
-        - TOKENIZERS_GIT_REPOSITORY
-        - ABSEIL_GIT_REPOSITORY
+        CANN_IMAGE: ${CANN_IMAGE:-swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-310p-ubuntu22.04-py3.11}
+        TOKENIZERS_GIT_REPOSITORY: ${TOKENIZERS_GIT_REPOSITORY:-https://github.com/mlc-ai/tokenizers-cpp.git}
+        ABSEIL_GIT_REPOSITORY: ${ABSEIL_GIT_REPOSITORY:-https://github.com/abseil/abseil-cpp.git}
     image: ascend-sam3-service:latest
-    container_name: sam3-service
-    privileged: true
+    container_name: sam3-service-npu${ASCEND_DEVICE_ID:-2}
     ports:
-      - "18000:8000"
+      - "${SAM3_PORT:-18000}:8000"
+    ipc: host
     volumes:
-      # 挂载模型目录（根据实际路径修改）
       - ./models:/app/models:ro
-      # 挂载昇腾驱动库（容器内加载 libascend_hal.so 等驱动库所需）
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
-      - ./service:/app/service:ro
-      # 如需持久化日志可打开
-      # - ./logs:/app/logs
+      - /usr/local/Ascend/develop:/usr/local/Ascend/develop:ro
+      - /etc/ascend_install.info:/etc/ascend_install.info:ro
     environment:
-      # 可通过环境变量覆盖默认模型路径
-      - VISION_MODEL=models/om-models/vision-encoder-tuned-2.om
-      - TEXT_MODEL=models/om-models/text-encoder.om
-      - DECODER_MODEL=models/om-models/decoder.om
-      - FPN_POS2=models/om-models/fpn_pos_2_constant.npy
-      - TOKENIZER=models/onnx-models/tokenizer.json
-      # - VISION_MODEL=models/om-models/EfficientSAM3/ef-vision-encoder.om
-      # - TEXT_MODEL=models/om-models/EfficientSAM3/ef-text-encoder.om
-      # - DECODER_MODEL=models/om-models/EfficientSAM3/ef-decoder.om
-      # - FPN_POS2=models/om-models/fpn_pos_2_constant.npy
-      # - TOKENIZER=models/om-models/tokenizer.json
-    # 昇腾设备映射
+      ASCEND_DEVICE_ID: "${ASCEND_DEVICE_ID:-2}"
+      VISION_MODEL: models/om-models/vision-encoder.om
+      TEXT_MODEL: models/om-models/text-encoder.om
+      DECODER_MODEL: models/om-models/decoder_static.om
+      FPN_POS2: models/om-models/fpn_pos_2_constant.npy
+      TOKENIZER: models/onnx-models/tokenizer.json
+    # 不使用 privileged，确保容器无法访问 VLLM 正在使用的 device 0/1。
     devices:
-      - /dev/davinci0:/dev/davinci0
+      - /dev/davinci${ASCEND_DEVICE_ID:-2}:/dev/davinci${ASCEND_DEVICE_ID:-2}
       - /dev/davinci_manager:/dev/davinci_manager
       - /dev/devmm_svm:/dev/devmm_svm
       - /dev/hisi_hdc:/dev/hisi_hdc
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
     restart: unless-stopped

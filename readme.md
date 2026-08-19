@@ -74,7 +74,7 @@
 
 ## 核心设计
 
-1. **单 batch 推理**：`Sam3Infer` 缓存上一次输入的图像，图片未变化时不再重复执行 Vision Encoder。
+1. **单 batch 推理**：每个请求执行一次 Vision Encoder，同一请求中的多个文本类别复用该次图像特征。
 2. **Vision 输出复用**：同一图片的多个 text prompt/word 推理时，Vision Encoder 的输出被反复复用。
 3. **Text 输出常驻显存**：`TextModel` 的输出 buffer 在对象生命周期内始终位于 NPU 显存，不重复分配/释放。
 4. **fpn_pos_2 常驻显存**：`fpn_pos_2_constant.npy` 在 `Sam3Infer::initialize()` 时加载并上传到 NPU，后续推理反复复用。
@@ -89,15 +89,10 @@
 `Sam3Infer::postprocess` 的执行步骤：
 
 1. **CPU 筛选**：对 `pred_logits` / `presence_logits` 做 sigmoid，计算最终得分并排序，保留高于 `confidence_threshold` 的结果。
-2. **CANN 批量 mask 解码**（`MaskPostprocessCann`）：
-   - D2D `aclrtMemcpy` 把选中的 N 张 mask 从 `[1, 200, 288, 288]` 拷贝到连续 buffer，得到 `[1, N, 288, 288]`。
-   - `aclnnGtScalar(0.0)` 对 mask logit 做二值化（logit > 0 为前景）。
-   - `aclnnCast` 转为 `uint8`。
-   - `aclnnUpsampleNearest2d` 批量 resize 到原图尺寸 `[1, N, orig_h, orig_w]`。
-   - D2H 并拆分为 N 张 `cv::Mat`。
+2. **Mask 解码**：当前稳定路径将选中的 `288x288` mask D2H，然后使用 OpenCV 按目标框裁剪、插值和二值化。
 3. **CPU 裁剪与后处理**：按每张 mask 对应的检测框裁剪，并调用 `keep_largest_part()` 保留最大连通域。
 
-若 CANN 路径执行失败，会自动回退到 CPU/OpenCV 单张解码。
+`MaskPostprocessCann` 保留为后续优化入口，但当前版本未启用 aclnn 批量后处理。
 
 ### 开关：`Sam3Input::need_mask`
 
@@ -111,11 +106,7 @@
 
 ### 链接的 CANN 库
 
-为使用 aclnn 单算子，`CMakeLists.txt` 中额外链接了：
-
-- `nnopbase`：`aclCreateTensor`、`aclCreateIntArray` 等 tensor 构造接口
-- `aclnn_ops_infer`：`aclnnUpsampleNearest2d`
-- `aclnn_math`：`aclnnGtScalar`、`aclnnCast`
+当前版本仅链接实际使用的 AscendCL/ACL Runtime 库。
 
 ---
 
@@ -166,9 +157,9 @@ make -j4
 ### 示例
 
 ```bash
-./build/ascendsam3_bench models/om-models/vision-encoder-tuned-2.om models/om-models/text-encoder.om models/om-models/decoder.om models/om-models/fpn_pos_2_constant.npy models/onnx-models/tokenizer.json workspace/persons.jpg "person" 
+ASCEND_DEVICE_ID=2 ./build/ascendsam3_bench models/om-models/vision-encoder.om models/om-models/text-encoder.om models/om-models/decoder_static.om models/om-models/fpn_pos_2_constant.npy models/onnx-models/tokenizer.json workspace/persons.jpg "person"
 
-./build/ascendsam3_demo models/om-models/vision-encoder-tuned-2.om models/om-models/text-encoder.om models/om-models/decoder.om models/om-models/fpn_pos_2_constant.npy models/onnx-models/tokenizer.json workspace/persons.jpg "person" workspace/result.jpg
+ASCEND_DEVICE_ID=2 ./build/ascendsam3_demo models/om-models/vision-encoder.om models/om-models/text-encoder.om models/om-models/decoder_static.om models/om-models/fpn_pos_2_constant.npy models/onnx-models/tokenizer.json workspace/persons.jpg "person" workspace/result.jpg
 
 ```
 
@@ -180,7 +171,7 @@ make -j4
 ```bash
 aoe --model=models/onnx-models/vision-encoder.onnx \
     --framework=5 \
-    --output=models/om-models/vision-encoder-tuned-2 \
+    --output=models/om-models/vision-encoder-tuned \
     --job_type=2 \
     --input_shape="images:1,3,1008,1008" \
     --insert_op_conf=models/config/vision.cfg
@@ -190,13 +181,15 @@ aoe --model=models/onnx-models/vision-encoder.onnx \
 
 ## 模型转换
 
-当前仓库中的 `models/om-models/*.om` 是通过 `soc_version=Ascend310` 转换的。若目标设备为 Ascend310P3，请使用对应 `soc_version` 重新转换。
+仓库不跟踪生成的 `.om` 文件。部署前必须按目标设备的实际 Chip Name 转换；Atlas 300I Duo 显示 `310P3` 时使用 `soc_version=Ascend310P3`。
 
 提供了 Docker 一键转换脚本，无需在宿主机安装 CANN：
 
 ```bash
 ./scripts/convert_models.sh
 ```
+
+运行所需 ONNX 为 `vision-encoder.onnx`、`text-encoder.onnx` 和 `decoder_static.onnx`；`geometry-encoder.onnx` 不在当前三模型推理链中使用。
 
 支持通过环境变量覆盖配置：
 
@@ -255,7 +248,7 @@ atc --model=models/onnx-models/decoder_static.onnx \
 
 - `GET /health`：健康检查
 - `POST /predict/file`：上传图片文件检测
-- `POST /predict/base64`：传入 base64 编码图片检测
+- `POST /predict`：传入 base64 编码图片检测
 
 ### 请求参数
 
@@ -277,15 +270,26 @@ python3 -m uvicorn service.main:app --host 0.0.0.0 --port 8000
 ### Docker 部署
 
 ```bash
-docker-compose up -d
+# 默认配置使用物理 device 2 和端口 18000，可在 .env 中覆盖。
+cp .env.example .env
+
+# 先转换出 vision-encoder.om、text-encoder.om、decoder_static.om
+SOC_VERSION=Ascend310P3 ./scripts/convert_models.sh
+
+# Docker 18.09 / Compose 1.22 可直接使用，不依赖 BuildKit。
+docker-compose build
+docker-compose config
+docker-compose up -d --no-build
 ```
 
-模型目录通过 `docker-compose.yml` 中的 `volumes` 挂载到容器内，请根据实际路径修改。
+模型目录通过 `docker-compose.yml` 只读挂载。容器不使用 `privileged`，默认只映射 `/dev/davinci2`；应用通过 `ASCEND_DEVICE_ID` 选择相同的物理 Device ID。
+
+如需在空闲的 device 3 启动第二实例，请使用独立 Compose project、端口和镜像容器名；不要让两个实例使用同一 Device ID。
 
 ### 调用示例
 
 ```bash
-curl -X POST http://localhost:18000/detect/base64 \
+curl -X POST http://localhost:18000/predict \
   -H "Content-Type: application/json" \
   -d '{
     "image": "<base64-image-string>",

@@ -5,6 +5,17 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# CANN 的部分算子库目录带有 host 架构后缀。兼容鲲鹏/aarch64 与 x86_64，
+# 避免在 CMake 文件中固定为某一种服务器架构。
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" SYSTEM_PROCESSOR_LOWER)
+if(SYSTEM_PROCESSOR_LOWER MATCHES "^(aarch64|arm64)$")
+    set(CANN_HOST_ARCH "aarch64")
+elseif(SYSTEM_PROCESSOR_LOWER MATCHES "^(x86_64|amd64)$")
+    set(CANN_HOST_ARCH "x86_64")
+else()
+    message(FATAL_ERROR "Unsupported host architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
 # Ascend CANN 环境：必须通过环境变量 ASCEND_HOME_PATH 指定，不硬编码默认值
 if(DEFINED ENV{ASCEND_HOME_PATH})
     set(ASCEND_HOME "$ENV{ASCEND_HOME_PATH}")
@@ -22,7 +33,7 @@ include_directories(
 link_directories(
     ${ASCEND_HOME}/lib64
     ${ASCEND_HOME}/lib64/plugin/opskernel
-    ${ASCEND_HOME}/opp/built-in/op_impl/ai_core/tbe/op_api/lib/linux/aarch64
+    ${ASCEND_HOME}/opp/built-in/op_impl/ai_core/tbe/op_api/lib/linux/${CANN_HOST_ARCH}
 )
 
 # OpenCV：必须通过环境变量 OPENCV_INSTALL_DIR 指定，不硬编码默认值
@@ -39,6 +50,7 @@ if(DEFINED ENV{OPENCV_INSTALL_DIR})
         ${OPENCV_CUSTOM_DIR}/lib/libopencv_*.a
         ${OPENCV_CUSTOM_DIR}/lib/libopencv_*.so
         ${OPENCV_CUSTOM_DIR}/lib/aarch64-linux-gnu/libopencv_*.so
+        ${OPENCV_CUSTOM_DIR}/lib/x86_64-linux-gnu/libopencv_*.so
     )
     if(NOT OpenCV_LIBS)
         message(FATAL_ERROR "No OpenCV libraries found under ${OPENCV_CUSTOM_DIR}/lib")
@@ -76,24 +88,26 @@ endif()
 # 当前环境是本机 aarch64，tokenizers-cpp 默认使用交叉编译前缀的工具名。
 # 在本机构建场景下没有 aarch64-unknown-linux-gnu-gcc，因此创建一个工具链目录，
 # 用同名符号链接指向本机 gcc/g++/ar，并通过 TOOLCHAIN_DIR 告知 tokenizers-cpp。
-set(TOKENIZERS_TOOLCHAIN_DIR "${CMAKE_BINARY_DIR}/toolchain-bin")
-file(MAKE_DIRECTORY ${TOKENIZERS_TOOLCHAIN_DIR})
-set(_cc "${CMAKE_C_COMPILER}")
-set(_cxx "${CMAKE_CXX_COMPILER}")
-set(_ar "${CMAKE_AR}")
-if(NOT _cc)
-    set(_cc "/usr/bin/gcc")
+if(CANN_HOST_ARCH STREQUAL "aarch64")
+    set(TOKENIZERS_TOOLCHAIN_DIR "${CMAKE_BINARY_DIR}/toolchain-bin")
+    file(MAKE_DIRECTORY ${TOKENIZERS_TOOLCHAIN_DIR})
+    set(_cc "${CMAKE_C_COMPILER}")
+    set(_cxx "${CMAKE_CXX_COMPILER}")
+    set(_ar "${CMAKE_AR}")
+    if(NOT _cc)
+        set(_cc "/usr/bin/gcc")
+    endif()
+    if(NOT _cxx)
+        set(_cxx "/usr/bin/g++")
+    endif()
+    if(NOT _ar)
+        set(_ar "/usr/bin/ar")
+    endif()
+    execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${_cc}  "${TOKENIZERS_TOOLCHAIN_DIR}/aarch64-unknown-linux-gnu-gcc")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${_cxx} "${TOKENIZERS_TOOLCHAIN_DIR}/aarch64-unknown-linux-gnu-g++")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${_ar}  "${TOKENIZERS_TOOLCHAIN_DIR}/aarch64-unknown-linux-gnu-ar")
+    set(TOOLCHAIN_DIR "${TOKENIZERS_TOOLCHAIN_DIR}/" CACHE PATH "tokenizers-cpp toolchain dir" FORCE)
 endif()
-if(NOT _cxx)
-    set(_cxx "/usr/bin/g++")
-endif()
-if(NOT _ar)
-    set(_ar "/usr/bin/ar")
-endif()
-execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${_cc}  "${TOKENIZERS_TOOLCHAIN_DIR}/aarch64-unknown-linux-gnu-gcc")
-execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${_cxx} "${TOKENIZERS_TOOLCHAIN_DIR}/aarch64-unknown-linux-gnu-g++")
-execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${_ar}  "${TOKENIZERS_TOOLCHAIN_DIR}/aarch64-unknown-linux-gnu-ar")
-set(TOOLCHAIN_DIR "${TOKENIZERS_TOOLCHAIN_DIR}/" CACHE PATH "tokenizers-cpp toolchain dir" FORCE)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # 优先使用本地 vendored 的 tokenizers-cpp；不存在时从 GitHub 拉取
@@ -122,28 +136,17 @@ else()
 endif()
 list(APPEND EXTRA_LIBS tokenizers_cpp)
 
-# 不同 CANN 版本运行时库与 aclnn 库名称不同，按需查找
-# CANN 8.x：runtime / aclnn_ops_infer / aclnn_math
-# CANN 9.x：acl_rt / opapi
+# 当前实现只调用 AscendCL/ACL Runtime API；mask 后处理走 ACL memcpy +
+# OpenCV，不直接调用 aclnn。仅链接实际使用的库，避免 CANN 版本变化时因
+# acl_op_compiler、nnopbase 或拆分后的 aclnn 库名称变化导致构建失败。
+find_library(CANN_ASCENDCL_LIB NAMES ascendcl PATHS ${ASCEND_HOME}/lib64 NO_DEFAULT_PATH)
 find_library(CANN_ACLRT_LIB NAMES runtime acl_rt PATHS ${ASCEND_HOME}/lib64 NO_DEFAULT_PATH)
-find_library(CANN_ACLNN_INFER_LIB NAMES aclnn_ops_infer PATHS ${ASCEND_HOME}/lib64 NO_DEFAULT_PATH)
-find_library(CANN_ACLNN_MATH_LIB NAMES aclnn_math PATHS ${ASCEND_HOME}/lib64 NO_DEFAULT_PATH)
-find_library(CANN_OPAPI_LIB NAMES opapi PATHS ${ASCEND_HOME}/opp/built-in/op_impl/ai_core/tbe/op_api/lib/linux/aarch64 NO_DEFAULT_PATH)
-
-set(CANN_LIBS ascendcl acl_op_compiler nnopbase)
+if(NOT CANN_ASCENDCL_LIB)
+    message(FATAL_ERROR "Cannot find libascendcl under ${ASCEND_HOME}/lib64")
+endif()
+set(CANN_LIBS ${CANN_ASCENDCL_LIB})
 if(CANN_ACLRT_LIB)
     list(APPEND CANN_LIBS ${CANN_ACLRT_LIB})
-else()
-    message(FATAL_ERROR "Cannot find CANN runtime library (runtime or acl_rt) under ${ASCEND_HOME}/lib64")
-endif()
-if(CANN_ACLNN_INFER_LIB)
-    list(APPEND CANN_LIBS ${CANN_ACLNN_INFER_LIB})
-endif()
-if(CANN_ACLNN_MATH_LIB)
-    list(APPEND CANN_LIBS ${CANN_ACLNN_MATH_LIB})
-endif()
-if(CANN_OPAPI_LIB)
-    list(APPEND CANN_LIBS ${CANN_OPAPI_LIB})
 endif()
 
 # 静态库循环依赖时使用 start-group/end-group
@@ -209,4 +212,6 @@ target_link_libraries(ascendsam3_py PRIVATE
 
 # 可选：安装模型目录说明
 message(STATUS "ASCEND_HOME: ${ASCEND_HOME}")
+message(STATUS "CANN_HOST_ARCH: ${CANN_HOST_ARCH}")
+message(STATUS "CANN_LIBS: ${CANN_LIBS}")
 message(STATUS "OpenCV_LIBS: ${OpenCV_LIBS}")

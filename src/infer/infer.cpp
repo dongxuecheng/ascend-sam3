@@ -1,31 +1,65 @@
 #include "infer/infer.hpp"
 #include "infer/sam3infer.hpp"
 #include <acl/acl.h>
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include <iostream>
+#include <mutex>
 
-static bool g_acl_initialized = false;
+namespace
+{
+
+std::once_flag g_acl_init_once;
+aclError g_acl_init_result = static_cast<aclError>(-1);
+
+int configured_device_id()
+{
+    const char* value = std::getenv("ASCEND_DEVICE_ID");
+    if (value == nullptr || *value == '\0')
+    {
+        return 0;
+    }
+
+    errno = 0;
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed < 0 || parsed > INT_MAX)
+    {
+        std::cerr << "Invalid ASCEND_DEVICE_ID='" << value << "'" << std::endl;
+        return -1;
+    }
+    return static_cast<int>(parsed);
+}
+
+} // namespace
 
 std::shared_ptr<Infer> load(const ModelPaths& paths)
 {
-    if (!g_acl_initialized)
+    std::call_once(g_acl_init_once, []() {
+        g_acl_init_result = aclInit(nullptr);
+    });
+    if (g_acl_init_result != ACL_SUCCESS)
     {
-        aclError ret = aclInit(nullptr);
-        if (ret != ACL_SUCCESS)
-        {
-            std::cerr << "aclInit failed: " << ret << std::endl;
-            return nullptr;
-        }
-        g_acl_initialized = true;
-    }
-
-    aclError ret = aclrtSetDevice(0);
-    if (ret != ACL_SUCCESS && ret != ACL_ERROR_REPEAT_INITIALIZE)
-    {
-        std::cerr << "aclrtSetDevice failed: " << ret << std::endl;
+        std::cerr << "aclInit failed: " << g_acl_init_result << std::endl;
         return nullptr;
     }
 
-    auto infer = std::make_shared<Sam3Infer>(paths);
+    int device_id = configured_device_id();
+    if (device_id < 0)
+    {
+        return nullptr;
+    }
+
+    aclError ret = aclrtSetDevice(device_id);
+    if (ret != ACL_SUCCESS && ret != ACL_ERROR_REPEAT_INITIALIZE)
+    {
+        std::cerr << "aclrtSetDevice(" << device_id << ") failed: " << ret << std::endl;
+        return nullptr;
+    }
+    std::cout << "Using Ascend device " << device_id << std::endl;
+
+    auto infer = std::make_shared<Sam3Infer>(paths, device_id);
     if (!infer->initialize())
     {
         std::cerr << "Sam3Infer initialize failed" << std::endl;

@@ -3,7 +3,7 @@ SAM3 FastAPI 推理服务（基于 pybind11 封装的 ascendsam3）
 
 提供两个接口：
 - POST /detect/file    上传图片文件
-- POST /detect/base64  传入 base64 编码图片
+- POST /predict        传入 base64 编码图片
 
 请求参数：
 - class_names: 检测类别文本列表，例如 ["person", "car"]
@@ -51,9 +51,9 @@ def root():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 # 模型与资源路径，可通过环境变量覆盖
-VISION_MODEL = os.getenv("VISION_MODEL", "models/om-models/vision-encoder-tuned-2.om")
+VISION_MODEL = os.getenv("VISION_MODEL", "models/om-models/vision-encoder.om")
 TEXT_MODEL = os.getenv("TEXT_MODEL", "models/om-models/text-encoder.om")
-DECODER_MODEL = os.getenv("DECODER_MODEL", "models/om-models/decoder.om")
+DECODER_MODEL = os.getenv("DECODER_MODEL", "models/om-models/decoder_static.om")
 FPN_POS2 = os.getenv("FPN_POS2", "models/om-models/fpn_pos_2_constant.npy")
 TOKENIZER = os.getenv("TOKENIZER", "models/onnx-models/tokenizer.json")
 
@@ -166,7 +166,7 @@ def startup():
 def health():
     try:
         _load_model()
-        return {"status": "ok"}
+        return {"status": "ok", "device_id": int(os.getenv("ASCEND_DEVICE_ID", "0"))}
     except Exception as e:
         return JSONResponse(status_code=503, content={"status": "unhealthy", "error": str(e)})
 

@@ -23,6 +23,19 @@ aclError DecoderModel::decode(const std::array<void*, 3>& vision_features,
         return ACL_ERROR_INVALID_PARAM;
     }
 
+    const std::array<size_t, 6> provided_sizes{
+        vision_sizes[0], vision_sizes[1], vision_sizes[2],
+        fpn_pos_2_size, text_features_size, text_mask_size};
+    for (size_t i = 0; i < provided_sizes.size(); ++i)
+    {
+        if (provided_sizes[i] != input_size(i))
+        {
+            std::cerr << "Decoder input " << i << " size mismatch: OM expects " << input_size(i)
+                      << " bytes, provided " << provided_sizes[i] << " bytes" << std::endl;
+            return ACL_ERROR_INVALID_PARAM;
+        }
+    }
+
     aclmdlDataset* external_input = aclmdlCreateDataset();
     if (external_input == nullptr)
     {

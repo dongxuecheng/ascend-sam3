@@ -9,3 +9,4 @@ third_party/tokenizers-cpp/
 .pytest_cache/
 service/__pycache__
 *.json
+.env

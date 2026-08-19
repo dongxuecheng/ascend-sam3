@@ -77,6 +77,7 @@ class AclModel
     void destroy_resource();
 
     uint32_t model_id_      = 0;
+    bool model_loaded_      = false;
     aclmdlDesc* model_desc_ = nullptr;
     aclmdlDataset* input_dataset_  = nullptr;
     aclmdlDataset* output_dataset_ = nullptr;

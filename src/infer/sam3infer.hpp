@@ -10,6 +10,7 @@
 #include "infer/modelVision.hpp"
 #include "infer/sam3type.hpp"
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -40,7 +41,7 @@ struct VectorInt64Hash
 class Sam3Infer : public Infer
 {
   public:
-    Sam3Infer(const ModelPaths& paths);
+    Sam3Infer(const ModelPaths& paths, int device_id);
     ~Sam3Infer() override;
 
     /**
@@ -86,12 +87,17 @@ class Sam3Infer : public Infer
                                           void* presence_logits_buf);
 
     ModelPaths paths_;
+    int device_id_ = 0;
+
+    // AclModel 的输入/输出 dataset 与缓存 buffer 会被每次推理复用，
+    // 同一模型实例必须串行执行，避免 FastAPI 线程池并发覆盖数据。
+    std::mutex inference_mutex_;
 
     std::unique_ptr<VisionModel> vision_model_;
     std::unique_ptr<TextModel> text_model_;
     std::unique_ptr<DecoderModel> decoder_model_;
 
-    // CANN aclnn 单算子实现的 mask 后处理
+    // ACL D2D/D2H + OpenCV mask 后处理（当前稳定实现）
     MaskPostprocessCann mask_postprocess_;
 
     // fpn_pos_2 来自 npy，常驻显存

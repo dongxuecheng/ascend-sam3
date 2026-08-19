@@ -18,6 +18,7 @@ aclError AclModel::init(const std::string& model_path)
         std::cerr << "Load model " << model_path << " failed, error: " << ret << std::endl;
         return ret;
     }
+    model_loaded_ = true;
 
     model_desc_ = aclmdlCreateDesc();
     if (model_desc_ == nullptr)
@@ -154,10 +155,11 @@ size_t AclModel::output_size(size_t idx) const
 
 void AclModel::destroy_resource()
 {
-    if (model_id_ != 0)
+    if (model_loaded_)
     {
         aclmdlUnload(model_id_);
         model_id_ = 0;
+        model_loaded_ = false;
     }
 
     if (input_dataset_ != nullptr)

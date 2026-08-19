@@ -38,8 +38,9 @@ static inline float sigmoid(float x)
     return 1.0f / (1.0f + std::exp(-x));
 }
 
-Sam3Infer::Sam3Infer(const ModelPaths& paths)
+Sam3Infer::Sam3Infer(const ModelPaths& paths, int device_id)
     : paths_(paths)
+    , device_id_(device_id)
     , vision_model_(std::make_unique<VisionModel>())
     , text_model_(std::make_unique<TextModel>())
     , decoder_model_(std::make_unique<DecoderModel>())
@@ -48,6 +49,9 @@ Sam3Infer::Sam3Infer(const ModelPaths& paths)
 
 Sam3Infer::~Sam3Infer()
 {
+    // 析构可能发生在与初始化不同的线程，先恢复该模型所属设备的上下文。
+    (void)aclrtSetDevice(device_id_);
+
     if (fpn_pos_2_buf_ != nullptr)
     {
         aclrtFree(fpn_pos_2_buf_);
@@ -130,6 +134,52 @@ bool Sam3Infer::initialize()
     {
         std::cerr << "Init decoder model failed: " << ret << std::endl;
         return false;
+    }
+
+    const std::array<size_t, 3> expected_vision_outputs{
+        1ULL * 256 * 288 * 288 * sizeof(float),
+        1ULL * 256 * 144 * 144 * sizeof(float),
+        1ULL * 256 * 72 * 72 * sizeof(float)};
+    if (vision_model_->input_count() != 1 || vision_model_->output_count() != expected_vision_outputs.size())
+    {
+        std::cerr << "Vision model I/O count mismatch" << std::endl;
+        return false;
+    }
+    for (size_t i = 0; i < expected_vision_outputs.size(); ++i)
+    {
+        if (vision_model_->output_size(i) != expected_vision_outputs[i])
+        {
+            std::cerr << "Vision output " << i << " size mismatch: expect " << expected_vision_outputs[i]
+                      << ", got " << vision_model_->output_size(i) << std::endl;
+            return false;
+        }
+    }
+
+    if (text_model_->input_count() != 2 || text_model_->output_count() != 2 ||
+        text_model_->output_size(0) != 1ULL * TEXT_LENGTH * TEXT_DIM * sizeof(float))
+    {
+        std::cerr << "Text model I/O layout mismatch" << std::endl;
+        return false;
+    }
+
+    const std::array<size_t, 4> expected_decoder_outputs{
+        1ULL * MAX_MASKS * MASK_SIZE * MASK_SIZE * sizeof(float),
+        1ULL * MAX_MASKS * 4 * sizeof(float),
+        1ULL * MAX_MASKS * sizeof(float),
+        sizeof(float)};
+    if (decoder_model_->input_count() != 6 || decoder_model_->output_count() != expected_decoder_outputs.size())
+    {
+        std::cerr << "Decoder model I/O count mismatch" << std::endl;
+        return false;
+    }
+    for (size_t i = 0; i < expected_decoder_outputs.size(); ++i)
+    {
+        if (decoder_model_->output_size(i) != expected_decoder_outputs[i])
+        {
+            std::cerr << "Decoder output " << i << " size mismatch: expect " << expected_decoder_outputs[i]
+                      << ", got " << decoder_model_->output_size(i) << std::endl;
+            return false;
+        }
     }
 
     if (!load_fpn_pos_2())
@@ -305,6 +355,8 @@ bool Sam3Infer::get_or_encode_text(const TextPrompt& prompt,
 
 object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
 {
+    std::lock_guard<std::mutex> lock(inference_mutex_);
+
     double total_t0 = now_ms();
     object::DetectionBoxArray results;
     if (input == nullptr || input->image.empty())
@@ -313,16 +365,16 @@ object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
         return results;
     }
 
-    // 多线程环境（如 FastAPI/uvicorn）下，当前线程可能没有 ACL device context，
-    // 这里显式设置 device 0，确保后续 ACL 调用在当前线程可用。
-    int device_id = 0;
-    aclError ret = aclrtGetDevice(&device_id);
-    if (ret != ACL_SUCCESS)
+    // FastAPI/uvicorn 的工作线程可能没有 ACL device context，或者继承了其他
+    // device 的 context。每次推理都确保当前线程绑定到模型初始化时的设备。
+    int current_device = -1;
+    aclError ret = aclrtGetDevice(&current_device);
+    if (ret != ACL_SUCCESS || current_device != device_id_)
     {
-        ret = aclrtSetDevice(0);
-        if (ret != ACL_SUCCESS)
+        ret = aclrtSetDevice(device_id_);
+        if (ret != ACL_SUCCESS && ret != ACL_ERROR_REPEAT_INITIALIZE)
         {
-            std::cerr << "aclrtSetDevice(0) failed: " << ret << std::endl;
+            std::cerr << "aclrtSetDevice(" << device_id_ << ") failed: " << ret << std::endl;
             return results;
         }
     }

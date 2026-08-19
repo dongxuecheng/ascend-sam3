@@ -31,6 +31,13 @@ aclError TextModel::encode(const std::vector<int64_t>& input_ids, const std::vec
     }
 
     size_t input0_size = input_size(0);
+    size_t input1_size = input_size(1);
+    if (input0_size != input1_size)
+    {
+        std::cerr << "TextModel input size mismatch: input_ids=" << input0_size
+                  << ", attention_mask=" << input1_size << std::endl;
+        return ACL_ERROR_INVALID_PARAM;
+    }
     if (input0_size == 32 * sizeof(int32_t))
     {
         fill_input<int32_t>(input_buffer(0), input_ids);
