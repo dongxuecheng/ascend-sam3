@@ -301,9 +301,10 @@ device 2、device 3。每个 Device 固定只创建一个容器，容器内部�
 
 Ascend UDA 驱动不允许两个不同的容器 namespace 同时打开同一个物理 Device；
 这种配置会在内核日志中出现 `Conflict open udevid`，并使第二个容器的
-`aclInit()` 返回 `500000`。因此 `scripts/start_dual.sh` 会把两个 Compose 服务的
-容器副本数强制固定为 1，`.env` 中的实例数只控制容器内部 worker，不能用于
-扩展共享同一 Device 的容器。
+`aclInit()` 返回 `500000`。`docker-compose.dual.yml` 中每个后端都是一个独立
+Compose 服务，默认各创建一个容器；`.env` 中的实例数只控制容器内部 worker，
+不能用于扩展共享同一 Device 的容器。不要对 `sam3-npu2`、`sam3-npu3` 使用
+`docker-compose up --scale`。
 
 每个后端容器只映射一个 `/dev/davinciN`，容器内可见设备会重新编号为 0，
 所以所有实例均使用 `ASCEND_DEVICE_ID=0`。不要增加
@@ -339,8 +340,8 @@ SAM3_GATEWAY_IMAGE=nginx:1.30.4-alpine
 `SAM3_DEVICE_A_INSTANCES`、`SAM3_DEVICE_B_INSTANCES` 分别控制两个 Device
 容器内部的 Uvicorn/SAM3 worker 数。每个 worker 都会独立执行 `aclInit()`、加载
 一套 OM 模型并占用独立 NPU 内存。建议先使用 `1/1` 建立基线，再改为 `2/2`
-测试。启动脚本会拒绝非正整数以及大于 8 的误配置；8 是防误操作保护值，不代表
-硬件建议值。
+测试。实例数必须是正整数；根据当前压测结果，建议使用 `1` 或 `2`，不要仅因
+NPU 内存尚有空余就继续增加 worker。
 
 SAM3 worker 会在 FastAPI startup 阶段同步加载三套 OM 模型。实测单 worker
 初始化约需 28 秒，超过 Uvicorn 多进程管理器默认 5 秒的 worker 健康检查时间。
@@ -361,9 +362,9 @@ docker-compose -f docker-compose.dual.yml config
 服务器无法访问 Docker Hub，可先把该镜像同步到内部仓库，再通过
 `SAM3_GATEWAY_IMAGE` 指定完整镜像地址。
 
-当前单实例占用了 device 2 和端口 18000，切换时先停止旧编排，再通过启动脚本
-启动两个 Device 容器。实例数会写入各容器的 `SAM3_WORKERS`，并转换为
-`uvicorn --workers N`；Compose 容器副本数始终固定为 `1/1`：
+当前单实例占用了 device 2 和端口 18000，切换时先停止旧编排，再直接启动两个
+Device 服务。实例数会写入各容器的 `SAM3_WORKERS`，并转换为
+`uvicorn --workers N`；不要使用 `--scale` 增加 Compose 容器副本：
 
 ```bash
 # openEuler 上如果 firewalld 未自动创建 Docker zone，先持久化固定网桥名。
@@ -371,7 +372,8 @@ docker-compose -f docker-compose.dual.yml config
 firewall-cmd --permanent --zone=trusted --add-interface=br-sam3
 
 docker-compose down
-bash scripts/start_dual.sh
+docker-compose -f docker-compose.dual.yml \
+  up -d --no-build --force-recreate
 
 # br-sam3 创建后增加立即生效的运行时规则；不要重启 Docker 或 reload firewalld。
 firewall-cmd --zone=trusted --add-interface=br-sam3
@@ -393,7 +395,8 @@ firewall-cmd --permanent --zone=trusted --add-interface=br-sam3
 
 docker-compose -f docker-compose.dual.yml build sam3-npu2
 docker-compose -f docker-compose.dual.yml down --remove-orphans
-bash scripts/start_dual.sh
+docker-compose -f docker-compose.dual.yml \
+  up -d --no-build --force-recreate
 
 firewall-cmd --zone=trusted --add-interface=br-sam3
 ```
@@ -462,7 +465,8 @@ done
 
 ```bash
 docker-compose -f docker-compose.dual.yml build sam3-npu2
-bash scripts/start_dual.sh --force-recreate
+docker-compose -f docker-compose.dual.yml \
+  up -d --no-build --force-recreate
 ```
 
 如需回滚到原单实例部署：
@@ -492,7 +496,8 @@ cd /root/ascend-sam3
 # .env
 sed -i 's/^SAM3_DEVICE_A_INSTANCES=.*/SAM3_DEVICE_A_INSTANCES=1/' .env
 sed -i 's/^SAM3_DEVICE_B_INSTANCES=.*/SAM3_DEVICE_B_INSTANCES=1/' .env
-bash scripts/start_dual.sh --force-recreate
+docker-compose -f docker-compose.dual.yml \
+  up -d --no-build --force-recreate
 
 until curl -fsS http://127.0.0.1:18000/health; do sleep 2; done
 python3 scripts/benchmark_service.py \
@@ -509,7 +514,8 @@ python3 scripts/benchmark_service.py \
 ```bash
 sed -i 's/^SAM3_DEVICE_A_INSTANCES=.*/SAM3_DEVICE_A_INSTANCES=2/' .env
 sed -i 's/^SAM3_DEVICE_B_INSTANCES=.*/SAM3_DEVICE_B_INSTANCES=2/' .env
-bash scripts/start_dual.sh --force-recreate
+docker-compose -f docker-compose.dual.yml \
+  up -d --no-build --force-recreate
 
 until curl -fsS http://127.0.0.1:18000/health; do sleep 2; done
 python3 scripts/benchmark_service.py \
