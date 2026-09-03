@@ -296,8 +296,33 @@ Dockerfile 将构建分成 `build-base`、`dependencies`、`builder` 和 `runtim
 `docker-compose.dual.yml` 将 `sam3-npu2`、`sam3-npu3` 分别绑定到宿主机
 device 2、device 3。每个 Device 固定只创建一个容器，容器内部由 Uvicorn
 启动一个或多个独立 SAM3 worker 进程。Nginx 使用 `least_conn` 在两个 Device
-容器之间分流，容器内再由 Uvicorn 将连接交给 worker。所有后端都不暴露宿主机
-端口；客户端始终访问网关的一个端口，接口路径、参数和返回值与单实例完全相同。
+容器之间分流，容器内再由 Uvicorn 将连接交给 worker。三个容器使用 Linux host
+网络；两个后端分别只监听宿主机的 `127.0.0.1:18001`、`127.0.0.1:18002`，外部
+客户端始终访问网关的一个端口，接口路径、参数和返回值与单实例完全相同。
+
+使用 host 网络是针对旧版 openEuler Docker 的兼容措施。该版本在某些正常系统
+重启后会清理 `/data/docker/network/files/local-kv.db`，从而丢失用户自定义
+bridge 网络；旧容器随后因引用不存在的网络 ID 而以 255 退出。host 网络由内核
+提供，不依赖该网络数据库，因此 `restart: unless-stopped` 可以在 Docker 重启后
+直接恢复三个容器。后端只绑定回环地址，不会将 18001、18002 暴露到外部网卡。
+
+从旧 bridge 版本升级或已经出现 `network ... not found` 时，先移除持有旧网络 ID
+的三个容器，再按新配置创建一次。该操作不会删除镜像和只读挂载的模型目录：
+
+```bash
+cd /root/ascend-sam3
+docker-compose -f docker-compose.dual.yml down
+docker-compose -f docker-compose.dual.yml \
+  up -d --no-build --force-recreate
+```
+
+以后正常开机由三个服务的 `restart: unless-stopped` 自动恢复，不要在关机前执行
+`docker-compose down` 或手工 `docker stop`。可以在维护窗口重启服务器后验证：
+
+```bash
+docker-compose -f /root/ascend-sam3/docker-compose.dual.yml ps
+curl -fsS http://127.0.0.1:18000/health
+```
 
 Ascend UDA 驱动不允许两个不同的容器 namespace 同时打开同一个物理 Device；
 这种配置会在内核日志中出现 `Conflict open udevid`，并使第二个容器的
@@ -321,8 +346,10 @@ cp -n .env.example .env
 grep -q '^SAM3_DEVICE_A_INSTANCES=' .env || echo 'SAM3_DEVICE_A_INSTANCES=1' >> .env
 grep -q '^SAM3_DEVICE_B_INSTANCES=' .env || echo 'SAM3_DEVICE_B_INSTANCES=1' >> .env
 grep -q '^SAM3_WORKER_HEALTHCHECK_TIMEOUT=' .env || echo 'SAM3_WORKER_HEALTHCHECK_TIMEOUT=180' >> .env
+grep -q '^SAM3_BACKEND_A_PORT=' .env || echo 'SAM3_BACKEND_A_PORT=18001' >> .env
+grep -q '^SAM3_BACKEND_B_PORT=' .env || echo 'SAM3_BACKEND_B_PORT=18002' >> .env
 
-grep -E 'SAM3_DEVICE_A|SAM3_DEVICE_B|SAM3_DEVICE_A_INSTANCES|SAM3_DEVICE_B_INSTANCES|SAM3_WORKER_HEALTHCHECK_TIMEOUT|SAM3_PUBLIC_PORT|SAM3_GATEWAY_IMAGE' .env || true
+grep -E 'SAM3_DEVICE_A|SAM3_DEVICE_B|SAM3_DEVICE_A_INSTANCES|SAM3_DEVICE_B_INSTANCES|SAM3_WORKER_HEALTHCHECK_TIMEOUT|SAM3_BACKEND_[AB]_PORT|SAM3_PUBLIC_PORT|SAM3_GATEWAY_IMAGE' .env || true
 ```
 
 默认值如下，可根据实际设备号和镜像仓库修改：
@@ -333,8 +360,21 @@ SAM3_DEVICE_B=3
 SAM3_DEVICE_A_INSTANCES=1
 SAM3_DEVICE_B_INSTANCES=1
 SAM3_WORKER_HEALTHCHECK_TIMEOUT=180
+SAM3_BACKEND_A_PORT=18001
+SAM3_BACKEND_B_PORT=18002
 SAM3_PUBLIC_PORT=18000
 SAM3_GATEWAY_IMAGE=nginx:1.30.4-alpine
+```
+
+三个端口必须互不相同，并且不能与宿主机现有服务冲突。修改后端端口不会改变
+客户端地址；业务始终访问 `SAM3_PUBLIC_PORT`。
+
+如果启用了 firewalld，只放行对外的 `SAM3_PUBLIC_PORT`（默认 18000/tcp）；不要
+放行仅供本机访问的两个后端端口：
+
+```bash
+firewall-cmd --permanent --zone=public --add-port=18000/tcp
+firewall-cmd --zone=public --add-port=18000/tcp
 ```
 
 `SAM3_DEVICE_A_INSTANCES`、`SAM3_DEVICE_B_INSTANCES` 分别控制两个 Device
@@ -364,26 +404,20 @@ docker-compose -f docker-compose.dual.yml config
 
 当前单实例占用了 device 2 和端口 18000，切换时先停止旧编排，再直接启动两个
 Device 服务。实例数会写入各容器的 `SAM3_WORKERS`，并转换为
-`uvicorn --workers N`；不要使用 `--scale` 增加 Compose 容器副本：
+`uvicorn --workers N`；不要使用 `--scale` 增加 Compose 容器副本。首次从旧的
+bridge 网络版本升级时必须重建三个容器，以清除旧网络 ID：
 
 ```bash
-# openEuler 上如果 firewalld 未自动创建 Docker zone，先持久化固定网桥名。
-# permanent 配置不会立即修改当前防火墙，也不需要执行 firewall-cmd --reload。
-firewall-cmd --permanent --zone=trusted --add-interface=br-sam3
-
 docker-compose down
 docker-compose -f docker-compose.dual.yml \
   up -d --no-build --force-recreate
 
-# br-sam3 创建后增加立即生效的运行时规则；不要重启 Docker 或 reload firewalld。
-firewall-cmd --zone=trusted --add-interface=br-sam3
-
 docker-compose -f docker-compose.dual.yml ps
 ```
 
-`docker-compose.dual.yml` 将 Linux bridge 接口固定为 `br-sam3`，因此服务器重启
-或 Compose 重建网络后，永久 firewalld 规则仍然匹配。重复执行
-`--add-interface` 如果返回 `ALREADY_ENABLED`，表示规则已经存在，可继续后续步骤。
+`docker-compose.dual.yml` 不再创建 `br-sam3`，也不再依赖 Docker DNS、DNAT 或
+firewalld 的容器转发规则。Compose 的 `PORTS` 列在 host 网络模式下为空属于正常
+现象；实际监听端口用 `ss -lntp` 检查。
 
 如果服务器已经运行过旧版“同一 Device 扩展多个容器”的配置，必须先执行
 `down`，让健康容器和反复重启的冲突容器全部释放 Device，再迁移到单容器多
@@ -391,21 +425,19 @@ worker。由于 worker PID 响应头来自更新后的 Python 服务，本次需
 SAM3 镜像；第三方依赖层没有变化时会直接复用构建缓存：
 
 ```bash
-firewall-cmd --permanent --zone=trusted --add-interface=br-sam3
-
 docker-compose -f docker-compose.dual.yml build sam3-npu2
-docker-compose -f docker-compose.dual.yml down --remove-orphans
+docker-compose -f docker-compose.dual.yml down
 docker-compose -f docker-compose.dual.yml \
   up -d --no-build --force-recreate
-
-firewall-cmd --zone=trusted --add-interface=br-sam3
 ```
 
 检查网关、后端和 NPU：
 
 ```bash
-ip -br addr show br-sam3
-firewall-cmd --get-zone-of-interface=br-sam3
+docker-compose -f docker-compose.dual.yml config \
+  | grep -E 'network_mode|SAM3_(PUBLIC|BACKEND_[AB])_PORT'
+
+ss -lntp | grep -E ':(18000|18001|18002)\b'
 
 curl -fsS http://127.0.0.1:18000/gateway-health
 until curl -fsS http://127.0.0.1:18000/health; do sleep 2; done
@@ -444,7 +476,8 @@ curl -sS -D - -o /dev/null http://127.0.0.1:18000/
 ```
 
 网关会在响应中增加 `X-SAM3-Upstream`，Python 服务增加
-`X-SAM3-Worker-PID`。前者用于区分 Device 容器，后者用于区分容器内 worker；
+`X-SAM3-Worker-PID`。前者通过本机后端端口区分 Device 容器，后者用于区分
+容器内 worker；
 业务客户端不需要依赖这些运维响应头：
 
 ```bash
@@ -457,8 +490,8 @@ done
 两个 Device 容器分别设置了健康检查和自动重启，Uvicorn 主进程负责管理和
 重启容器内 worker。Nginx 对连接失败、超时以及
 502/503/504 最多尝试两个后端；检测 POST 请求没有写入副作用，因此允许故障
-重试。Docker 内置 DNS 会定期刷新两个服务容器的地址；容器重建后不需要手工
-修改 Nginx 配置。
+重试。Nginx 的 upstream 固定指向两个仅回环可见的后端端口；端口通过 `.env`
+传给 Nginx 模板，容器重建后不需要手工修改配置文件。
 
 需要更新 SAM3 镜像时，只构建一次，然后按 `.env` 的 worker 数重建两个后端
 容器和网关：
