@@ -14,6 +14,13 @@
 - [运行](#运行)
 - [AOE 调优](#aoe-调优)
 - [模型转换](#模型转换)
+- [FastAPI 推理服务](#fastapi-推理服务)
+- [Docker 启动前准备](#docker-启动前准备)
+- [Docker 单实例部署](#docker-单实例部署)
+- [Docker 多实例统一入口](#docker-多实例统一入口)
+- [日常启停与模式切换](#日常启停与模式切换)
+- [本机调用与远程访问](#本机调用与远程访问)
+- [多实例性能测试](#多实例性能测试)
 
 ---
 
@@ -268,19 +275,76 @@ source /home/HwHiAiUser/Ascend/ascend-toolkit/set_env.sh
 python3 -m uvicorn service.main:app --host 0.0.0.0 --port 8000
 ```
 
-### Docker 单实例部署
+### Docker 启动前准备
+
+以下命令在 Linux Ascend 服务器的项目目录执行，示例路径为 `/root/ascend-sam3`。
+统一使用 `docker-compose`；安装 Compose V2 的服务器可将其替换为 `docker compose`，
+其余参数不变。不需要额外启动脚本。默认配置下单实例和多实例共享 device 2 及
+18000 端口，只选择一种部署方式；切换步骤见下文。
 
 ```bash
-# 默认配置使用物理 device 2、容器内逻辑 device 0 和端口 18000，可在 .env 中覆盖。
-cp .env.example .env
+cd /root/ascend-sam3
+# 保留已有 .env，不覆盖设备号、端口和 worker 配置。
+cp -n .env.example .env
+npu-smi info
+```
 
-# 先转换出 vision-encoder.om、text-encoder.om、decoder_static.om
-SOC_VERSION=Ascend310P3 ./scripts/convert_models.sh
+先确认所选 Device 未被其他服务占用，且下列运行时模型文件均已准备好：
 
-# Docker 18.09 / Compose 1.22 可直接使用，不依赖 BuildKit。
-docker-compose build
-docker-compose config
-docker-compose up -d --no-build
+```text
+models/om-models/vision-encoder.om
+models/om-models/text-encoder.om
+models/om-models/decoder_static.om
+models/om-models/fpn_pos_2_constant.npy
+models/onnx-models/tokenizer.json
+```
+
+如果尚未生成 OM，按[模型转换](#模型转换)准备 ONNX 后执行；已有可用 OM 可跳过：
+
+```bash
+SOC_VERSION=Ascend310P3 bash scripts/convert_models.sh
+```
+
+以下健康检查和调用示例使用默认端口；若修改 `.env`，请同步替换命令中的端口。
+
+### Docker 单实例部署
+
+使用 `docker-compose.yml`，启动一个 `sam3-service` 容器、一个 Uvicorn worker，
+直接将宿主机 18000 映射到容器 8000，无 Nginx。检查 `.env`：
+
+```dotenv
+ASCEND_PHYSICAL_DEVICE_ID=2
+ASCEND_LOGICAL_DEVICE_ID=0
+SAM3_PORT=18000
+```
+
+`ASCEND_PHYSICAL_DEVICE_ID` 表示宿主机 `/dev/davinciN` 的设备编号；仅映射一颗
+设备后，容器内使用逻辑编号 0。多实例的 `SAM3_DEVICE_*_INSTANCES` 不控制该模式。
+
+首次部署或修改需要打包到镜像的代码时构建：
+
+```bash
+cd /root/ascend-sam3
+docker-compose -f docker-compose.yml build sam3-service
+```
+
+已有 `ascend-sam3-service:latest` 镜像时，直接检查配置并启动：
+
+```bash
+cd /root/ascend-sam3
+docker-compose -f docker-compose.yml config
+docker-compose -f docker-compose.yml up -d --no-build
+docker-compose -f docker-compose.yml ps
+docker-compose -f docker-compose.yml logs --tail=100 sam3-service
+
+# 日志出现 Application startup complete 后验证。
+curl --max-time 10 -fsS http://127.0.0.1:18000/health
+```
+
+如果修改了 `.env`、设备映射或更新镜像，重建容器以应用配置：
+
+```bash
+docker-compose -f docker-compose.yml up -d --no-build --force-recreate
 ```
 
 Dockerfile 将构建分成 `build-base`、`dependencies`、`builder` 和 `runtime`
@@ -291,6 +355,10 @@ Dockerfile 将构建分成 `build-base`、`dependencies`、`builder` 和 `runtim
 
 模型目录通过 `docker-compose.yml` 只读挂载。容器不使用 `privileged`，默认只映射物理 `/dev/davinci2`；Docker 设备白名单将容器限制在该卡上，单卡可见后应用使用容器内索引 `ASCEND_DEVICE_ID=0`。
 
+单实例配置仍使用 Compose 默认 bridge 网络，依赖 Docker 的网络状态和端口转发。
+此前针对 `network ... not found` 的 host 网络规避方案只应用于下面的多实例配置，
+不要将两种模式的网络检查命令混用。
+
 ### Docker 多实例统一入口
 
 `docker-compose.dual.yml` 将 `sam3-npu2`、`sam3-npu3` 分别绑定到宿主机
@@ -300,11 +368,11 @@ device 2、device 3。每个 Device 固定只创建一个容器，容器内部�
 网络；两个后端分别只监听宿主机的 `127.0.0.1:18001`、`127.0.0.1:18002`，外部
 客户端始终访问网关的一个端口，接口路径、参数和返回值与单实例完全相同。
 
-使用 host 网络是针对旧版 openEuler Docker 的兼容措施。该版本在某些正常系统
-重启后会清理 `/data/docker/network/files/local-kv.db`，从而丢失用户自定义
-bridge 网络；旧容器随后因引用不存在的网络 ID 而以 255 退出。host 网络由内核
-提供，不依赖该网络数据库，因此 `restart: unless-stopped` 可以在 Docker 重启后
-直接恢复三个容器。后端只绑定回环地址，不会将 18001、18002 暴露到外部网卡。
+使用 host 网络是针对本服务器 Docker 启动时网络状态库被清理的兼容措施。故障
+日志包含 `cleanup DB .../network/files/local-kv.db`，自定义 bridge 网络消失，
+旧容器因引用不存在的网络 ID 而启动失败。新配置不再引用该自定义网络；自动恢复
+仍要求 Docker、Ascend 驱动和模型挂载正常，且容器未被人工停止或删除。
+后端只绑定回环地址，不会将 18001、18002 暴露到外部网卡。
 
 从旧 bridge 版本升级或已经出现 `network ... not found` 时，先移除持有旧网络 ID
 的三个容器，再按新配置创建一次。该操作不会删除镜像和只读挂载的模型目录：
@@ -316,11 +384,14 @@ docker-compose -f docker-compose.dual.yml \
   up -d --no-build --force-recreate
 ```
 
-以后正常开机由三个服务的 `restart: unless-stopped` 自动恢复，不要在关机前执行
-`docker-compose down` 或手工 `docker stop`。可以在维护窗口重启服务器后验证：
+需要正常开机自动恢复时，保留三个服务的 `restart: unless-stopped`，不要在关机前
+手工停止或删除容器。可以在维护窗口重启服务器后验证：
 
 ```bash
-docker-compose -f /root/ascend-sam3/docker-compose.dual.yml ps
+cd /root/ascend-sam3
+docker-compose -f docker-compose.dual.yml ps
+curl -fsS http://127.0.0.1:18001/health
+curl -fsS http://127.0.0.1:18002/health
 curl -fsS http://127.0.0.1:18000/health
 ```
 
@@ -369,13 +440,7 @@ SAM3_GATEWAY_IMAGE=nginx:1.30.4-alpine
 三个端口必须互不相同，并且不能与宿主机现有服务冲突。修改后端端口不会改变
 客户端地址；业务始终访问 `SAM3_PUBLIC_PORT`。
 
-如果启用了 firewalld，只放行对外的 `SAM3_PUBLIC_PORT`（默认 18000/tcp）；不要
-放行仅供本机访问的两个后端端口：
-
-```bash
-firewall-cmd --permanent --zone=public --add-port=18000/tcp
-firewall-cmd --zone=public --add-port=18000/tcp
-```
+外部访问还需要宿主机入站规则允许 `SAM3_PUBLIC_PORT`，见[本机调用与远程访问](#本机调用与远程访问)。
 
 `SAM3_DEVICE_A_INSTANCES`、`SAM3_DEVICE_B_INSTANCES` 分别控制两个 Device
 容器内部的 Uvicorn/SAM3 worker 数。每个 worker 都会独立执行 `aclInit()`、加载
@@ -390,11 +455,10 @@ SAM3 worker 会在 FastAPI startup 阶段同步加载三套 OM 模型。实测�
 加载时留出余量。该值必须是正整数；如果服务器上的实测初始化时间明显更长，可
 继续调大。
 
-构建共享 SAM3 镜像并检查最终配置：
+首次部署或更新 SAM3 代码时，只构建一次共享镜像；已有可用镜像可跳过构建：
 
 ```bash
 docker-compose -f docker-compose.dual.yml build sam3-npu2
-docker-compose -f docker-compose.dual.yml config
 ```
 
 `sam3-npu3` 直接复用 `sam3-npu2` 构建产生的
@@ -402,18 +466,19 @@ docker-compose -f docker-compose.dual.yml config
 服务器无法访问 Docker Hub，可先把该镜像同步到内部仓库，再通过
 `SAM3_GATEWAY_IMAGE` 指定完整镜像地址。
 
-当前单实例占用了 device 2 和端口 18000，切换时先停止旧编排，再直接启动两个
-Device 服务。实例数会写入各容器的 `SAM3_WORKERS`，并转换为
-`uvicorn --workers N`；不要使用 `--scale` 增加 Compose 容器副本。首次从旧的
-bridge 网络版本升级时必须重建三个容器，以清除旧网络 ID：
+已有镜像时，日常启动直接执行下列命令。若单实例仍在运行，先按
+[日常启停与模式切换](#日常启停与模式切换)停止它，以释放 Device 和端口：
 
 ```bash
-docker-compose down
-docker-compose -f docker-compose.dual.yml \
-  up -d --no-build --force-recreate
-
+cd /root/ascend-sam3
+docker-compose -f docker-compose.dual.yml config
+docker-compose -f docker-compose.dual.yml up -d --no-build
 docker-compose -f docker-compose.dual.yml ps
 ```
+
+镜像已存在时，`docker-compose -f docker-compose.dual.yml up -d` 同样可用；
+加 `--no-build` 表示本次只启动，不自动构建。修改 `.env` 中的 worker 数或端口后，
+执行 `up -d --no-build --force-recreate`，普通 `restart` 不会重新读取这些配置。
 
 `docker-compose.dual.yml` 不再创建 `br-sam3`，也不再依赖 Docker DNS、DNAT 或
 firewalld 的容器转发规则。Compose 的 `PORTS` 列在 host 网络模式下为空属于正常
@@ -440,12 +505,18 @@ docker-compose -f docker-compose.dual.yml config \
 ss -lntp | grep -E ':(18000|18001|18002)\b'
 
 curl -fsS http://127.0.0.1:18000/gateway-health
-until curl -fsS http://127.0.0.1:18000/health; do sleep 2; done
+curl --max-time 10 -fsS http://127.0.0.1:18001/health
+curl --max-time 10 -fsS http://127.0.0.1:18002/health
+curl --max-time 10 -fsS http://127.0.0.1:18000/health
 
 docker logs --tail=100 sam3-gateway
 docker-compose -f docker-compose.dual.yml logs --tail=100 sam3-npu2 sam3-npu3
 npu-smi info
 ```
+
+模型加载期间可能暂时连接失败或返回 502，待两个后端日志出现
+`Application startup complete` 后重新检查。`/gateway-health` 只证明 Nginx 就绪；
+网关 `/health` 成功只证明至少一个后端可用，因此应分别检查 18001 和 18002。
 
 Compose 会自动生成带序号的后端容器名。下面两个结果都必须是 `1`；大于 1
 说明仍残留旧版的同 Device 多容器配置：
@@ -502,17 +573,85 @@ docker-compose -f docker-compose.dual.yml \
   up -d --no-build --force-recreate
 ```
 
-如需回滚到原单实例部署：
-
-```bash
-docker-compose -f docker-compose.dual.yml down
-docker-compose up -d --no-build
-```
-
 多实例提高的是并发吞吐和排队延迟。单个请求仍完整地交给其中一个实例处理；
 只有同时存在多个请求时，各进程才会并行执行推理。相同 device 上的多个进程会
 竞争同一组 AI Core 和内存带宽，因此显存能容纳不等于吞吐一定线性增长，必须以
 下面的压测结果为准。
+
+### 日常启停与模式切换
+
+停止后再次启动（不删除容器），只执行当前部署模式对应的一组命令。
+单实例：
+
+```bash
+# 按需执行 stop 或 up。
+docker-compose -f docker-compose.yml stop
+docker-compose -f docker-compose.yml up -d --no-build
+```
+
+多实例：
+
+```bash
+# 按需执行 stop 或 up。
+docker-compose -f docker-compose.dual.yml stop
+docker-compose -f docker-compose.dual.yml up -d --no-build
+```
+
+以下切换命令会中断 SAM3 服务并删除原模式的容器；镜像与宿主机 `models` 目录
+保留。两种模式共用镜像，镜像已构建时无需再次构建。不要添加 `--remove-orphans`，
+以免删除同一 Compose 项目下由其他配置管理的流水线容器。
+
+```bash
+cd /root/ascend-sam3
+# 单实例切换到多实例。
+docker-compose -f docker-compose.yml down
+docker-compose -f docker-compose.dual.yml up -d --no-build
+```
+
+```bash
+cd /root/ascend-sam3
+# 多实例切换回单实例。
+docker-compose -f docker-compose.dual.yml down
+docker-compose -f docker-compose.yml up -d --no-build
+```
+
+两个配置均使用 `restart: unless-stopped`。正常重启服务器前无需执行 `down`；
+手工 `stop` 的容器不会自动恢复，`down` 删除的容器需要重新执行对应的 `up`。
+Docker 开机自启、设备节点和模型目录就绪是恢复的前提，健康检查本身不会让
+一个仍在运行但 `unhealthy` 的容器自动重启。
+
+### 本机调用与远程访问
+
+两种模式的默认业务入口均为 `http://127.0.0.1:18000`。在服务器上先验证
+`/health`，再用实际图片验证预测；将图片路径替换为已存在的文件：
+
+```bash
+curl --max-time 10 -fsS http://127.0.0.1:18000/health
+curl --max-time 120 -fsS http://127.0.0.1:18000/predict/file \
+  -F 'image=@test-images/example.jpg' \
+  -F 'class_names=person' \
+  -F 'confidence=0.3' \
+  -F 'return_mask=false'
+```
+
+上传字段名是 `image`，不是 `file`。浏览器使用 `http://服务器IP:18000/`；
+当前网关未配置 HTTPS。远程无法访问但本机预测成功时，不影响宿主机程序通过
+`127.0.0.1:18000` 调用。host 网络容器也可使用此地址；普通 bridge 容器中的
+`127.0.0.1` 指向容器自身，调用方需要使用可达的宿主机地址。
+
+多实例的 host 网络共享宿主机网络栈，外部请求受宿主机 `INPUT` 及上游 ACL
+控制。本机访问成功而远程失败时，检查 `ss -lntp` 的监听地址、防火墙、路由和
+客户端代理，不要仅凭此现象重建 SAM3 镜像。若使用 firewalld，先用
+`firewall-cmd --get-active-zones` 确认入口网卡所属区域。以下仅以 `public` 区域
+及默认端口为例，按实际区域和访问策略放行：
+
+```bash
+firewall-cmd --permanent --zone=public --add-port=18000/tcp
+firewall-cmd --zone=public --add-port=18000/tcp
+```
+
+只供本机调用时无需为外部访问额外放行；后端 18001、18002 只监听回环地址。
+`firewalld` 未运行时检查现有 iptables/nftables 或上游规则，不要清空防火墙。
 
 ### 多实例性能测试
 
@@ -576,8 +715,9 @@ python3 scripts/benchmark_service.py \
 
 比较两个 JSON/终端结果时，优先看 `throughput_images_per_second`、p95 延迟、
 失败数、`upstream_counts` 和 `worker_counts`。`upstream_counts` 在两种配置下
-通常都只有两个容器 IP；配置为 `2/2` 时，`worker_counts` 应出现四个“容器 IP +
-PID”组合，表明四个模型进程均收到请求。并发数应至少等于总 worker 数；如果
+通常都只有两个本机后端地址（默认 `127.0.0.1:18001` 和 `127.0.0.1:18002`）；
+配置为 `2/2` 时，`worker_counts` 应出现四个“后端地址 + PID”组合，表明四个
+模型进程均收到请求。用于观察全部 worker 的压测并发数应至少等于总 worker 数；如果
 图片只有十几张，使用 `--rounds 3` 或更高可降低偶然波动。压测期间同时执行
 `watch -n 1 npu-smi info`，确认没有显存耗尽、温度降频或实例启动失败。建议
 每组测试重复三次并取中位数。
