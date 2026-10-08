@@ -27,6 +27,8 @@ services:
       DECODER_MODEL: models/om-models/decoder_static.om
       FPN_POS2: models/om-models/fpn_pos_2_constant.npy
       TOKENIZER: models/onnx-models/tokenizer.json
+      SAM3_REFINE_MAX_CROPS: "${SAM3_REFINE_MAX_CROPS:-4}"
+      SAM3_REFINE_MAX_PRE_DETECTIONS: "${SAM3_REFINE_MAX_PRE_DETECTIONS:-64}"
     # 不使用 privileged，确保容器无法访问 VLLM 正在使用的物理 device 0/1。
     devices:
       - /dev/davinci${ASCEND_PHYSICAL_DEVICE_ID:-2}:/dev/davinci${ASCEND_PHYSICAL_DEVICE_ID:-2}

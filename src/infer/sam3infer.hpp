@@ -53,6 +53,9 @@ class Sam3Infer : public Infer
     object::DetectionBoxArray forward(std::shared_ptr<Sam3Input> input) override;
 
   private:
+    // Caller holds inference_mutex_; helpers must never recursively call forward.
+    object::DetectionBoxArray forward_refine(Sam3Input& input);
+    object::DetectionBoxArray decode_current_image(const Sam3Input& input, bool strict = false);
     bool load_fpn_pos_2();
     aclError upload_external_text(const ExternalTextFeature& ext, void*& text_features_buf, void*& text_mask_buf);
 

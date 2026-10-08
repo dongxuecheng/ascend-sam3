@@ -44,6 +44,8 @@ class RequestResult:
     upstream: str
     worker_pid: str = ""
     error: str = ""
+    refinement: dict | None = None
+    detections: list | None = None
 
     @property
     def success(self) -> bool:
@@ -52,12 +54,12 @@ class RequestResult:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Benchmark SAM3 /predict/file with a directory of images."
+        description="Benchmark SAM3 ordinary or obj-refine file inference with a directory of images."
     )
     parser.add_argument(
         "--url",
         default="http://127.0.0.1:18000/predict/file",
-        help="SAM3 predict/file endpoint.",
+        help="SAM3 file endpoint; default path switches automatically in obj-refine mode.",
     )
     parser.add_argument(
         "--images",
@@ -86,6 +88,13 @@ def parse_args() -> argparse.Namespace:
         help="Class prompt; repeat this option for multiple classes.",
     )
     parser.add_argument("--confidence", type=float, default=0.3)
+    parser.add_argument("--mode", choices=["detect", "obj-refine"], default="detect")
+    parser.add_argument("--pre-detect-label", action="append", dest="pre_detect_labels")
+    parser.add_argument("--pre-detect-confidence", type=float)
+    parser.add_argument("--max-crops", type=int, help="Crop budget; omitted uses the server's .env default.")
+    parser.add_argument("--crop-max-size", type=int, default=640)
+    parser.add_argument("--no-merge-results", action="store_true")
+    parser.add_argument("--save-results", action="store_true", help="Include boxes/RLE in JSON for manual accuracy review.")
     parser.add_argument(
         "--return-mask",
         action="store_true",
@@ -109,9 +118,16 @@ def parse_args() -> argparse.Namespace:
         parser.error("--confidence must be in [0, 1]")
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
+    if (args.max_crops is not None and not 1 <= args.max_crops <= 32) or not 1 <= args.crop_max_size <= 16384:
+        parser.error("--max-crops must be in [1,32], --crop-max-size in [1,16384]")
+    if args.pre_detect_confidence is not None and not 0 <= args.pre_detect_confidence <= 1:
+        parser.error("--pre-detect-confidence must be in [0,1]")
 
     if not args.class_names:
-        args.class_names = ["person", "fire"]
+        args.class_names = ["helmet"] if args.mode == "obj-refine" else ["person", "fire"]
+    args.pre_detect_labels = args.pre_detect_labels or ["person"]
+    if args.mode == "obj-refine" and args.url.endswith("/predict/file"):
+        args.url = args.url[:-len("/predict/file")] + "/predict-obj-refine/file"
     return args
 
 
@@ -139,6 +155,7 @@ def build_multipart_request(
     class_names: Sequence[str],
     confidence: float,
     return_mask: bool,
+    extra_fields: Sequence[tuple[str, str]] = (),
 ) -> PreparedRequest:
     boundary = f"----sam3-benchmark-{uuid.uuid4().hex}"
     body = bytearray()
@@ -147,6 +164,7 @@ def build_multipart_request(
         *(('class_names', name) for name in class_names),
         ("confidence", str(confidence)),
         ("return_mask", "true" if return_mask else "false"),
+        *extra_fields,
     ]
     for name, value in fields:
         _multipart_line(body, f"--{boundary}")
@@ -175,7 +193,7 @@ def build_multipart_request(
 
 
 def execute_request(
-    url: str, prepared: PreparedRequest, timeout: float
+    url: str, prepared: PreparedRequest, timeout: float, save_results: bool = False
 ) -> RequestResult:
     request = urllib.request.Request(
         url,
@@ -190,7 +208,9 @@ def execute_request(
     started = time.perf_counter()
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            response.read()
+            payload = json.loads(response.read())
+            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+                raise ValueError("Response must contain a results list")
             elapsed = time.perf_counter() - started
             return RequestResult(
                 image_path=prepared.image_path,
@@ -198,6 +218,8 @@ def execute_request(
                 elapsed_seconds=elapsed,
                 upstream=response.headers.get("X-SAM3-Upstream", "direct"),
                 worker_pid=response.headers.get("X-SAM3-Worker-PID", ""),
+                refinement=payload.get("refinement"),
+                detections=payload["results"] if save_results else None,
             )
     except urllib.error.HTTPError as exc:
         detail = exc.read(512).decode("utf-8", errors="replace")
@@ -211,7 +233,7 @@ def execute_request(
             ),
             error=detail or str(exc),
         )
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         return RequestResult(
             image_path=prepared.image_path,
             status=0,
@@ -261,6 +283,9 @@ def make_summary(
         "rounds": args.rounds,
         "concurrency": args.concurrency,
         "class_names": args.class_names,
+        "mode": args.mode,
+        "pre_detect_labels": args.pre_detect_labels if args.mode == "obj-refine" else [],
+        "merge_results": not args.no_merge_results if args.mode == "obj-refine" else None,
         "return_mask": args.return_mask,
         "total_requests": len(results),
         "successful_requests": len(successful),
@@ -280,6 +305,16 @@ def make_summary(
         "upstream_counts": dict(sorted(upstream_counts.items())),
         "worker_counts": dict(sorted(worker_counts.items())),
     }
+    refine_stats = [r.refinement for r in successful if r.refinement is not None]
+    if refine_stats:
+        summary["refinement"] = {
+            "mean_crops_processed": mean(r["crops_processed"] for r in refine_stats),
+            "limited_requests": sum(bool(r["limited"]) for r in refine_stats),
+            "mean_stage_ms": {
+                key: mean(r["timings_ms"][key] for r in refine_stats)
+                for key in refine_stats[0]["timings_ms"]
+            },
+        }
     return summary
 
 
@@ -308,6 +343,8 @@ def print_summary(summary: dict) -> None:
     print("workers:")
     for worker, count in summary["worker_counts"].items():
         print(f"  {worker}: {count}")
+    if "refinement" in summary:
+        print("refinement: " + json.dumps(summary["refinement"], ensure_ascii=False))
 
 
 def write_json_report(
@@ -332,12 +369,25 @@ def main() -> int:
     args = parse_args()
     try:
         images = discover_images(Path(args.images))
+        extra_fields = []
+        if args.mode == "obj-refine":
+            crop_cfg = {"max_size": args.crop_max_size}
+            if args.max_crops is not None:
+                crop_cfg["max_crops"] = args.max_crops
+            extra_fields = [
+                *(("pre_detect_labels", label) for label in args.pre_detect_labels),
+                ("merge_results", "false" if args.no_merge_results else "true"),
+                ("crop_config_json", json.dumps(crop_cfg)),
+            ]
+            if args.pre_detect_confidence is not None:
+                extra_fields.append(("pre_detect_confidence", str(args.pre_detect_confidence)))
         prepared_images = [
             build_multipart_request(
                 image,
                 args.class_names,
                 args.confidence,
                 args.return_mask,
+                extra_fields,
             )
             for image in images
         ]
@@ -352,7 +402,7 @@ def main() -> int:
 
     for warmup_index in range(args.warmup):
         prepared = prepared_images[warmup_index % len(prepared_images)]
-        result = execute_request(args.url, prepared, args.timeout)
+        result = execute_request(args.url, prepared, args.timeout, args.save_results)
         if not result.success:
             print(
                 f"warmup failed for {result.image_path}: "
@@ -369,7 +419,7 @@ def main() -> int:
         max_workers=args.concurrency
     ) as executor:
         futures = [
-            executor.submit(execute_request, args.url, prepared, args.timeout)
+            executor.submit(execute_request, args.url, prepared, args.timeout, args.save_results)
             for prepared in requests
         ]
         for completed, future in enumerate(

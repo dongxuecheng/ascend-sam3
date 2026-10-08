@@ -255,8 +255,47 @@ atc --model=models/onnx-models/decoder_static.onnx \
 ### 接口
 
 - `GET /health`：健康检查
+- `GET /ui-config`：前端支持的模式和目标细化裁剪预算（不执行推理）
 - `POST /predict/file`：上传图片文件检测
 - `POST /predict`：传入 base64 编码图片检测
+- `POST /predict-obj-refine`、`POST /predict-obj-refine/file`：主体预检测与局部精细检测
+
+### 前端界面
+
+访问 `http://服务器IP:18000/`。页面布局与
+[trt-sam3 前端](https://github.com/leon0514/trt-sam3/tree/593b4ae199c23e6a2042a7dff268c79a9904b253/workspace/app/frontend)
+对齐：深色三栏、左侧参数设置、中间图片和叠加结果、右侧目标列表。
+支持拖拽上传、标签管理、Mask/框/文字开关、类别/置信度/面积筛选、
+目标勾选与排序、JSON 查看及结果图下载；小屏幕自动调整布局。
+
+推理请求仍使用昇腾接口，不需要 TensorRT 或新的前端依赖：
+
+- 多类别文本提示：调用 `/predict/file`。
+- 目标细化（obj-refine）：调用 `/predict-obj-refine/file`，可设置预检测标签、
+  精细检测标签、合并原图结果及 Omnicrop 参数。精细标签应不同于预检测标签，
+  例如预检测 `person`、精细检测 `helmet`。`max_crops` 留空使用服务器默认值，
+  上限由 `.env` 的 `SAM3_REFINE_MAX_CROPS` 决定；触及预算会显示提示。
+- 纯框、文本+框、跨图参考提示：保留模式提示但禁用，当前 Ascend 模型链路不支持。
+
+前端资源位于 `service/static/`，随服务镜像一起构建。更新代码后选择当前部署模式
+重建镜像；仅 `up --no-build` 不会把新页面复制到旧镜像：
+
+```bash
+# 单实例
+docker-compose -f docker-compose.yml build sam3-service
+docker-compose -f docker-compose.yml up -d --no-build --force-recreate
+
+# 或多实例统一入口（不要与单实例同时启动）
+docker-compose -f docker-compose.dual.yml build sam3-npu2
+docker-compose -f docker-compose.dual.yml up -d --no-build --force-recreate
+```
+
+重建后浏览器使用 `Ctrl+F5` 强制刷新。几何提示不会因换界面自动获得支持。
+前端逻辑测试（Node.js 20+，不需要 NPU）：
+
+```bash
+node --test tests/frontend.test.cjs
+```
 
 ### 请求参数
 
@@ -723,6 +762,191 @@ python3 scripts/benchmark_service.py \
 每组测试重复三次并取中位数。
 
 ### 调用示例
+
+#### 主体预检测与局部精细检测（obj-refine）
+
+新增 `POST /predict-obj-refine`（JSON）和
+`POST /predict-obj-refine/file`（multipart）。现有 `/predict` 和 `/predict/file`
+的参数与返回格式保持不变。新流程复用原有三个 OM、位置编码和 tokenizer，
+不需要 geometry encoder，也不需要重新执行 ATC。
+
+处理顺序：原图预检测 → 可选的原图精细检测（复用视觉特征）→ 主体框聚合裁剪
+→ 每个裁剪区域精细检测 → 恢复原图坐标 → 按类别进行 IoU=0.5 的 NMS。
+每个裁剪区域内的多个文本提示共用一次视觉编码，文本特征沿用现有缓存。
+裁剪使用 CPU/OpenCV，模型推理仍走 ACL/AIPP；没有引入 CUDA/TensorRT。
+裁剪聚合是独立实现，不直接复制上游代码；参数兼容，但不保证与上游
+OmniCrop 的裁剪区域逐个一致，也不保证不同推理后端结果数值完全一致。
+
+**更新后必须构建新镜像**（仅重启旧镜像不会增加接口）：
+
+```bash
+# 单实例：选择这一组
+docker-compose -f docker-compose.yml build sam3-service
+docker-compose -f docker-compose.yml up -d --no-build --force-recreate
+
+# 多实例：选择这一组，不要与单实例同时占用同一 Device
+docker-compose -f docker-compose.dual.yml build sam3-npu2
+docker-compose -f docker-compose.dual.yml up -d --no-build --force-recreate
+```
+
+也可以将上述 `docker-compose` 替换为 `docker compose`。模型无需重转。
+两个多实例后端共用新镜像，新路由自动通过现有 Nginx 转发。
+
+文件上传示例（`image` 字段，类别支持重复字段或逗号分隔）：
+
+```bash
+curl -fsS http://127.0.0.1:18000/predict-obj-refine/file \
+  -F 'image=@test-images/example.jpg' \
+  -F 'pre_detect_labels=person' \
+  -F 'class_names=helmet' \
+  -F 'class_names=vest' \
+  -F 'confidence=0.3' \
+  -F 'pre_detect_confidence=0.2' \
+  -F 'merge_results=true' \
+  -F 'return_mask=true' \
+  -F 'crop_config_json={"max_crops":2,"max_size":640,"padding":20}'
+```
+
+JSON 接口兼容上游的字段名（不同于旧 `/predict` 的 `image`/`class_names`）：
+
+```json
+{
+  "image_base64": "<图片Base64，支持data URL>",
+  "confidence_threshold": 0.3,
+  "pre_detect_labels": ["person"],
+  "prompts": [{"text": "helmet"}, {"text": "vest"}],
+  "return_mask": true,
+  "merge_results": true,
+  "crop_config": {"max_crops": 2, "max_size": 640, "padding": 20}
+}
+```
+
+JSON 默认 confidence=0.5、return_mask=false；文件版默认 confidence=0.3、
+return_mask=true。`pre_detect_confidence` 可选，未设置时使用精细检测阈值。
+标签去除空白、按大小写不敏感去重；精细标签中与预检测标签重复的项被过滤。
+空预检测标签回退为 `person`。空精细标签只返回预检测结果，不执行无用裁剪。
+仅支持文本，`prompts[].boxes` 非空会返回 422，不会静默忽略几何提示。
+
+兼容上游的合并语义：
+
+| 情况 | 返回结果 |
+|---|---|
+| `merge_results=true` | 预检测 + 原图精细检测 + 裁剪精细检测，按类别去重 |
+| `merge_results=false` | 预检测 + 裁剪精细检测，不执行原图精细检测 |
+| 没有预检测目标，`true` | 继续原图精细检测，不裁剪 |
+| 没有预检测目标，`false` | 空结果 |
+
+此功能不是目标关联/人员属性判定，不会返回“安全帽属于哪个人”的关系。
+ROI 仅限定检测范围；关闭原图精细检测时，ROI 外的精细类别可能被漏掉。
+
+`crop_config` 全部参数：
+
+| 参数 | 默认值 | 作用 |
+|---|---|---|
+| `max_size` | 640 | 聚合区域尺寸/留白扩张限制；大主体框不被强制截断 |
+| `padding` | 20 | 原图像素单位的边缘留白 |
+| `w_diou` | 30 | 聚合距离成本权重 |
+| `w_expansion` | 5 | 聚合面积扩张成本权重 |
+| `count_penalty` | 120 | 增大时更倾向合并、减少裁剪数 |
+| `nms_threshold` | 0.2 | 裁剪区域重叠合并阈值，不是检测结果 NMS 阈值 |
+| `enable_ar_fix` | true | 尝试修正宽高比，受图像边界和尺寸限制 |
+| `target_ar` | 1.0 | 目标宽高比 |
+| `max_crops` | 环境变量，默认 4 | 每请求最多处理的裁剪区域 |
+| `max_pre_detections` | 环境变量，默认 64 | 最多参与聚合的预检测框 |
+
+在 `.env` 配置容器上限（两个 Compose 文件均已传入环境变量）：
+
+```dotenv
+SAM3_REFINE_MAX_CROPS=4
+SAM3_REFINE_MAX_PRE_DETECTIONS=64
+```
+
+请求可降低上限，但超过容器配置会返回 422。修改 `.env` 后需要
+`up -d --no-build --force-recreate`，不需要重新构建。全局允许的最大配置
+分别为 32 和 256；生产建议先用少量裁剪。
+超过预检测预算时优先用高置信度主体框；超过裁剪预算时优先用包含高置信度
+主体的区域。被跳过的区域不执行局部推理，响应 `limited=true` 明确告知降级。
+`merge_results=true` 时仍保留原图精细检测，但不能代替被跳过区域的放大检测。
+
+响应保留 `results`，额外增加 `refinement` 诊断信息：
+
+```json
+{
+  "results": [],
+  "refinement": {
+    "pre_detections": 5,
+    "candidate_crops": 3,
+    "crops_processed": 2,
+    "limited": true,
+    "merge_results": true,
+    "timings_ms": {
+      "pre_detect": 1000,
+      "full_refine": 340,
+      "crop_plan": 1,
+      "crop_refine": 2400,
+      "nms": 1,
+      "total": 3742
+    }
+  }
+}
+```
+
+上述数字仅演示结构，不代表性能承诺。`total` 是 C++ 流程耗时，不含等待实例锁、
+图片解码、最终 PNG/RLE 编码和 HTTP 传输；端到端性能以测试脚本的延迟为准。
+日志 `[Refine]` 同时打印各阶段耗时、候选/实际裁剪数和是否限额。
+框坐标始终为原图像素，mask 仍为框相对的局部掩码，RLE 按行优先排列，
+格式为 `[1-based起点,长度,...]`，不是 COCO 的列优先 RLE。
+
+#### 对比普通检测与 obj-refine
+
+测试脚本仍仅依赖 Python 标准库。使用相同图片、类别、并发和 mask 选项对比：
+
+```bash
+# 普通检测：原图上检测相同三个类别
+python3 scripts/benchmark_service.py --images test-images \
+  --class-name person --class-name helmet --class-name vest \
+  --concurrency 2 --rounds 3 --warmup 2 \
+  --return-mask --save-results --label ordinary --json-output benchmark-ordinary.json
+
+# 精细检测：person 用于定位，helmet/vest 用于局部识别
+python3 scripts/benchmark_service.py --images test-images --mode obj-refine \
+  --pre-detect-label person --class-name helmet --class-name vest \
+  --max-crops 2 --concurrency 2 --rounds 3 --warmup 2 \
+  --return-mask --save-results --label refine --json-output benchmark-refine.json
+```
+
+`--mode obj-refine` 默认切换到 `/predict-obj-refine/file`；自定义 `--url` 应指向
+对应文件接口。增加 `--no-merge-results` 测试仅裁剪路径，
+`--pre-detect-confidence 0.2` 可以降低预检测阈值（公平性能对比先保持阈值相同）。
+报告增加平均裁剪数、限额请求数和阶段耗时；`--save-results` 会将检测框/RLE
+保存到报告供人工准确率检查。不设置该参数则不保留大掩码。
+需要有标注的样本才能评价漏检率，不能仅凭“检测数量变多”认定准确率提升。
+
+注意：每个 ROI 仍会缩放到 1008×1008，额外执行一次 Vision 编码。
+obj-refine 主要改善局部小目标识别，不保证提高吞吐；裁剪越多通常越慢。
+多视频流应按需调用，并结合吞吐、P95、限额比例评估，避免全量帧默认开启。
+
+#### 离线回归测试
+
+无需 NPU 的接口测试（伪模型，用于验证协议和错误码，不代表 OM 推理通过）：
+
+```bash
+python3 -m pip install -r service/requirements.txt httpx
+python3 -m unittest discover -s tests -v
+```
+
+裁剪聚合、限额及 NMS 的独立 C++ 测试，不依赖 CANN/OpenCV：
+
+```bash
+g++ -std=c++17 -Wall -Wextra -Isrc tests/refine_crop_test.cpp -o /tmp/sam3-refine-crop-test
+/tmp/sam3-refine-crop-test
+```
+
+服务器验收应额外覆盖：无主体（两种 merge 分支）、多人/重叠裁剪、边缘主体、
+空精细类别、不同预检测阈值、预算触顶、多 worker 并发，以及框/mask 原图对齐。
+模型执行失败返回 500；无目标是正常 200 空结果，不能混为一谈。
+
+#### 普通检测
 
 ```bash
 curl -X POST http://localhost:18000/predict \

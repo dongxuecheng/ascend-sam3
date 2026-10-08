@@ -72,7 +72,67 @@ public:
             }
         }
 
-        object::DetectionBoxArray boxes = infer_->forward(input);
+        object::DetectionBoxArray boxes;
+        {
+            py::gil_scoped_release release;
+            boxes = infer_->forward(input);
+        }
+        return serialize(boxes, return_mask);
+    }
+
+    py::dict detect_obj_refine(const py::bytes& image_bytes,
+                               const std::vector<std::string>& pre_labels,
+                               const std::vector<std::string>& refine_labels,
+                               float confidence, bool return_mask, bool merge_results,
+                               const sam3::refine::CropConfig& config,
+                               float pre_detect_confidence)
+    {
+        config.validate();
+        if (pre_labels.empty()) throw std::invalid_argument("pre_detect_labels must not be empty");
+        const std::string raw = image_bytes;
+        const std::vector<uint8_t> bytes(raw.begin(), raw.end());
+        auto input = std::make_shared<Sam3Input>();
+        input->image = cv::imdecode(bytes, cv::IMREAD_COLOR);
+        if (input->image.empty()) throw std::invalid_argument("Failed to decode image");
+        input->obj_refine = true;
+        input->confidence_threshold = confidence;
+        input->pre_detect_confidence = pre_detect_confidence;
+        input->need_mask = return_mask;
+        input->merge_results = merge_results;
+        input->crop_config = config;
+        for (const auto& label : pre_labels) input->pre_detect_prompts.push_back(make_prompt(label));
+        for (const auto& label : refine_labels) input->text_prompts.push_back(make_prompt(label));
+        object::DetectionBoxArray boxes;
+        {
+            // ACL executes outside the GIL; one instance is still serialized by
+            // Sam3Infer's mutex. Health endpoints can run during long refinements.
+            py::gil_scoped_release release;
+            boxes = infer_->forward(input);
+        }
+        const auto& stats = input->refine_stats;
+        py::dict timings;
+        timings["pre_detect"] = stats.pre_detect_ms;
+        timings["full_refine"] = stats.full_refine_ms;
+        timings["crop_plan"] = stats.crop_plan_ms;
+        timings["crop_refine"] = stats.crop_refine_ms;
+        timings["nms"] = stats.nms_ms;
+        timings["total"] = stats.total_ms;
+        py::dict metadata;
+        metadata["pre_detections"] = stats.pre_detections;
+        metadata["candidate_crops"] = stats.candidate_crops;
+        metadata["crops_processed"] = stats.crops_processed;
+        metadata["limited"] = stats.limited;
+        metadata["merge_results"] = merge_results;
+        metadata["timings_ms"] = timings;
+        py::dict result;
+        result["results"] = serialize(boxes, return_mask);
+        result["refinement"] = metadata;
+        return result;
+    }
+
+private:
+    static py::list serialize(const object::DetectionBoxArray& boxes, bool return_mask)
+    {
 
         py::list result;
         for (const auto& box : boxes)
@@ -107,7 +167,6 @@ public:
         return result;
     }
 
-private:
     TextPrompt make_prompt(const std::string& text)
     {
         TextPrompt prompt;
@@ -124,6 +183,20 @@ PYBIND11_MODULE(ascendsam3, m)
 {
     m.doc() = "SAM3 Ascend NPU inference Python bindings";
 
+    using sam3::refine::CropConfig;
+    py::class_<CropConfig>(m, "CropConfig")
+        .def(py::init<>())
+        .def_readwrite("max_size", &CropConfig::max_size)
+        .def_readwrite("padding", &CropConfig::padding)
+        .def_readwrite("w_diou", &CropConfig::w_diou)
+        .def_readwrite("w_expansion", &CropConfig::w_expansion)
+        .def_readwrite("count_penalty", &CropConfig::count_penalty)
+        .def_readwrite("nms_threshold", &CropConfig::nms_threshold)
+        .def_readwrite("enable_ar_fix", &CropConfig::enable_ar_fix)
+        .def_readwrite("target_ar", &CropConfig::target_ar)
+        .def_readwrite("max_crops", &CropConfig::max_crops)
+        .def_readwrite("max_pre_detections", &CropConfig::max_pre_detections);
+
     py::class_<Sam3PyModel>(m, "Sam3Model")
         .def(py::init<const std::string&, const std::string&, const std::string&, const std::string&, const std::string&>(),
              py::arg("vision_model"),
@@ -136,5 +209,11 @@ PYBIND11_MODULE(ascendsam3, m)
              py::arg("class_names") = std::vector<std::string>{"person"},
              py::arg("confidence") = 0.3f,
              py::arg("return_mask") = true,
-             "Detect objects in an image. Returns a list of detection dicts.");
+             "Detect objects in an image. Returns a list of detection dicts.")
+        .def("detect_obj_refine", &Sam3PyModel::detect_obj_refine,
+             py::arg("image_bytes"), py::arg("pre_detect_labels"), py::arg("refine_labels"),
+             py::arg("confidence") = 0.5f, py::arg("return_mask") = false,
+             py::arg("merge_results") = true, py::arg("crop_config") = CropConfig{},
+             py::arg("pre_detect_confidence") = -1.0f,
+             "Pre-detect, cluster crops, refine and run same-class NMS. Returns results and diagnostics.");
 }

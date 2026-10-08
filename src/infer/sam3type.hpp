@@ -6,6 +6,21 @@
 #include <string>
 #include <vector>
 #include <opencv2/opencv.hpp>
+#include "common/refineCrop.hpp"
+
+struct RefineStats
+{
+    int pre_detections = 0;
+    int candidate_crops = 0;
+    int crops_processed = 0;
+    bool limited = false;
+    double pre_detect_ms = 0;
+    double full_refine_ms = 0;
+    double crop_plan_ms = 0;
+    double crop_refine_ms = 0;
+    double nms_ms = 0;
+    double total_ms = 0;
+};
 
 struct TextPrompt
 {
@@ -39,6 +54,13 @@ struct Sam3Input
 
     // 方式二：外部传入 text encoder 输出，优先级高于 text_prompts
     std::vector<ExternalTextFeature> external_text_features;
+
+    bool obj_refine = false;
+    std::vector<TextPrompt> pre_detect_prompts;
+    bool merge_results = true;
+    float pre_detect_confidence = -1.0f; // negative means use confidence_threshold
+    sam3::refine::CropConfig crop_config;
+    RefineStats refine_stats; // per-request output, not shared across workers
 };
 
 #endif

@@ -1,22 +1,20 @@
 """
 SAM3 FastAPI 推理服务（基于 pybind11 封装的 ascendsam3）
 
-提供两个接口：
-- POST /detect/file    上传图片文件
-- POST /predict        传入 base64 编码图片
+接口：POST /predict、/predict/file，以及 /predict-obj-refine、/predict-obj-refine/file。
 
 请求参数：
 - class_names: 检测类别文本列表，例如 ["person", "car"]
 - confidence: 置信度阈值，默认 0.3
-- return_mask: 是否返回 mask（PNG 字节，base64 编码），默认 true
+- return_mask: 是否返回检测框相对的 mask RLE，默认 true
 
 返回：
-- num_detections: 检测数量
-- elapsed_ms: 推理耗时（毫秒）
-- boxes: 检测框列表，每项包含 class_name、score、box、mask_png（可选）
+- results: 每项包含 label、score、box，以及可选的 mask RLE 和尺寸
+- refinement: 仅精细检测接口包含裁剪数量、限额标记和阶段耗时
 """
 
 import base64
+import binascii
 import os
 import time
 from typing import List, Optional
@@ -24,10 +22,11 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from service.refinement import CropConfig, RefinePrompt, RefineRequest, MAX_CROPS, MAX_PRE_DETECTIONS
 
 # 尝试导入 pybind11 模块；如果 build/ 下没有，则尝试 PYTHONPATH 中已安装的版本
 import sys
@@ -38,7 +37,7 @@ if BUILD_DIR not in sys.path:
 
 import ascendsam3
 
-app = FastAPI(title="SAM3 Ascend Inference Service", version="1.1.0")
+app = FastAPI(title="SAM3 Ascend Inference Service", version="1.2.0")
 
 
 @app.middleware("http")
@@ -56,7 +55,17 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.get("/")
 def root():
     """返回前端页面"""
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"), headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/ui-config")
+def ui_config():
+    """Frontend capabilities, without loading a model or requiring device access."""
+    return JSONResponse(content={
+        "backend": "ascend",
+        "supported_modes": ["multi-class", "obj-refine"],
+        "refinement_limits": {"max_crops": MAX_CROPS, "max_pre_detections": MAX_PRE_DETECTIONS},
+    }, headers={"Cache-Control": "no-store"})
 
 # 模型与资源路径，可通过环境变量覆盖
 VISION_MODEL = os.getenv("VISION_MODEL", "models/om-models/vision-encoder.om")
@@ -121,7 +130,10 @@ def _decode_base64_image(b64: str) -> bytes:
 def _detect(image_bytes: bytes, class_names: List[str], confidence: float, return_mask: bool) -> dict:
     model = _load_model()
     raw_results = model.detect(image_bytes, class_names, confidence, return_mask)
+    return _format_results(raw_results, return_mask)
 
+
+def _format_results(raw_results, return_mask: bool) -> dict:
     results = []
     for r in raw_results:
         raw_box = r.get("box")
@@ -162,6 +174,64 @@ def _detect(image_bytes: bytes, class_names: List[str], confidence: float, retur
     return {
         "results": results
     }
+
+
+def _refine(image_bytes: bytes, req: RefineRequest) -> dict:
+    config = ascendsam3.CropConfig()
+    for key, value in (req.crop_config or CropConfig()).model_dump().items():
+        setattr(config, key, value)
+    try:
+        raw = _load_model().detect_obj_refine(
+            image_bytes, req.pre_detect_labels, req.refine_labels(),
+            req.confidence_threshold, req.return_mask, req.merge_results, config,
+            req.pre_detect_confidence if req.pre_detect_confidence is not None else -1.0,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    result = _format_results(raw["results"], req.return_mask)
+    result["refinement"] = raw["refinement"]
+    return result
+
+
+@app.post("/predict-obj-refine")
+def refine_base64(req: RefineRequest):
+    """Text-only subject pre-detection and crop refinement (upstream JSON protocol)."""
+    value = req.image_base64.split(",", 1)[-1]
+    try:
+        image_bytes = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid Base64 image") from exc
+    return _refine(image_bytes, req)
+
+
+@app.post("/predict-obj-refine/file")
+def refine_file(
+    image: UploadFile = File(...),
+    class_names: List[str] = Form(["helmet"]),
+    pre_detect_labels: List[str] = Form(["person"]),
+    confidence: float = Form(0.3, ge=0, le=1),
+    pre_detect_confidence: Optional[float] = Form(None, ge=0, le=1),
+    return_mask: bool = Form(True),
+    merge_results: bool = Form(True),
+    crop_config_json: Optional[str] = Form(None),
+):
+    """File upload version; repeated or comma-separated label fields are accepted."""
+    def split_labels(values):
+        return [label.strip() for value in values for label in value.split(",") if label.strip()]
+    try:
+        cfg = CropConfig.model_validate_json(crop_config_json) if crop_config_json else None
+        req = RefineRequest(
+            image_base64="file-upload",
+            pre_detect_labels=split_labels(pre_detect_labels),
+            prompts=[RefinePrompt(text=name) for name in split_labels(class_names)],
+            confidence_threshold=confidence, pre_detect_confidence=pre_detect_confidence,
+            return_mask=return_mask, merge_results=merge_results, crop_config=cfg,
+        )
+    except (ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _refine(image.file.read(), req)
 
 
 @app.on_event("startup")

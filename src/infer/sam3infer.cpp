@@ -6,6 +6,7 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 
 static double now_ms()
 {
@@ -419,9 +420,12 @@ object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
         if (ret != ACL_SUCCESS && ret != ACL_ERROR_REPEAT_INITIALIZE)
         {
             std::cerr << "aclrtSetDevice(" << device_id_ << ") failed: " << ret << std::endl;
+            if (input->obj_refine) throw std::runtime_error("obj-refine failed to bind Ascend device");
             return results;
         }
     }
+
+    if (input->obj_refine) return forward_refine(*input);
 
     // 1. Vision encoder：每次 forward 都执行
     ret = vision_model_->encode(input->image);
@@ -431,6 +435,14 @@ object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
         return results;
     }
 
+    results = decode_current_image(*input);
+    std::cout << "[Time] Sam3Infer forward total: " << (now_ms() - total_t0) << " ms" << std::endl;
+    return results;
+}
+
+object::DetectionBoxArray Sam3Infer::decode_current_image(const Sam3Input& input, bool strict)
+{
+    object::DetectionBoxArray results;
     std::array<void*, 3> vision_features{
         vision_model_->feature_ptr(0),
         vision_model_->feature_ptr(1),
@@ -450,13 +462,14 @@ object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
         if (ret != ACL_SUCCESS)
         {
             std::cerr << "Decoder execute failed: " << ret << std::endl;
+            if (strict) throw std::runtime_error("obj-refine decoder failed: " + std::to_string(ret));
             return false;
         }
 
         object::DetectionBoxArray batch = postprocess(
-            input->image,
-            input->confidence_threshold,
-            input->need_mask,
+            input.image,
+            input.confidence_threshold,
+            input.need_mask,
             class_name,
             decoder_model_->pred_masks_ptr(),
             decoder_model_->pred_boxes_ptr(),
@@ -467,9 +480,9 @@ object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
         return true;
     };
 
-    if (!input->external_text_features.empty())
+    if (!input.external_text_features.empty())
     {
-        for (const auto& ext : input->external_text_features)
+        for (const auto& ext : input.external_text_features)
         {
             void* text_features = nullptr;
             void* text_mask     = nullptr;
@@ -477,6 +490,7 @@ object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
             if (ret != ACL_SUCCESS)
             {
                 std::cerr << "Upload external text feature failed: " << ret << std::endl;
+                if (strict) throw std::runtime_error("obj-refine text feature upload failed");
                 continue;
             }
             process_one(ext.class_name.empty() ? "object" : ext.class_name,
@@ -484,9 +498,9 @@ object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
                         ext_text_features_size_, ext_text_mask_size_);
         }
     }
-    else if (!input->text_prompts.empty())
+    else if (!input.text_prompts.empty())
     {
-        for (const auto& prompt : input->text_prompts)
+        for (const auto& prompt : input.text_prompts)
         {
             void* text_features = nullptr;
             void* text_mask     = nullptr;
@@ -495,6 +509,7 @@ object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
             if (!get_or_encode_text(prompt, text_features, text_mask, text_feature_size, text_mask_size))
             {
                 std::cerr << "Text encode failed for prompt: " << prompt.text << std::endl;
+                if (strict) throw std::runtime_error("obj-refine text encoder failed");
                 continue;
             }
             process_one(prompt.text.empty() ? "object" : prompt.text,
@@ -507,9 +522,113 @@ object::DetectionBoxArray Sam3Infer::forward(std::shared_ptr<Sam3Input> input)
         std::cerr << "No text prompt or external text feature provided" << std::endl;
     }
 
-    double total_t1 = now_ms();
-    std::cout << "[Time] Sam3Infer forward total: " << (total_t1 - total_t0) << " ms" << std::endl;
     return results;
+}
+
+object::DetectionBoxArray Sam3Infer::forward_refine(Sam3Input& input)
+{
+    const double started = now_ms();
+    input.crop_config.validate();
+    if (input.pre_detect_prompts.empty() || !input.external_text_features.empty())
+        throw std::invalid_argument("obj-refine requires pre-detect text prompts and no external features");
+    const auto valid_threshold = [](float v) { return std::isfinite(v) && v >= 0 && v <= 1; };
+    if (!valid_threshold(input.confidence_threshold) ||
+        (input.pre_detect_confidence != -1.0f && !valid_threshold(input.pre_detect_confidence)))
+        throw std::invalid_argument("Invalid obj-refine confidence threshold");
+    auto& stats = input.refine_stats;
+    stats = RefineStats{};
+    auto encode = [&](const cv::Mat& image) {
+        const aclError ret = vision_model_->encode(image);
+        if (ret != ACL_SUCCESS)
+            throw std::runtime_error("obj-refine vision encoder failed: " + std::to_string(ret));
+    };
+
+    Sam3Input stage;
+    stage.image = input.image;
+    stage.need_mask = input.need_mask;
+    stage.confidence_threshold = input.pre_detect_confidence < 0 ?
+        input.confidence_threshold : input.pre_detect_confidence;
+    stage.text_prompts = input.pre_detect_prompts;
+    encode(stage.image);
+    auto pre_results = decode_current_image(stage, true);
+    stats.pre_detections = static_cast<int>(pre_results.size());
+    stats.pre_detect_ms = now_ms() - started;
+    // Upstream keeps pre-detections even when merge_results=false.
+    object::DetectionBoxArray results = pre_results;
+
+    double t = now_ms();
+    if (input.merge_results && !input.text_prompts.empty())
+    {
+        stage.confidence_threshold = input.confidence_threshold;
+        stage.text_prompts = input.text_prompts;
+        auto full = decode_current_image(stage, true); // reuse original features BEFORE any crop encode
+        results.insert(results.end(), full.begin(), full.end());
+    }
+    stats.full_refine_ms = now_ms() - t;
+
+    t = now_ms();
+    std::vector<size_t> ranked(pre_results.size());
+    std::iota(ranked.begin(), ranked.end(), 0);
+    std::stable_sort(ranked.begin(), ranked.end(), [&](size_t a, size_t b) {
+        return pre_results[a].score > pre_results[b].score;
+    });
+    std::vector<sam3::refine::Rect> seed_boxes;
+    for (size_t idx : ranked)
+    {
+        const auto& b = pre_results[idx].box;
+        seed_boxes.push_back({b.left, b.top, b.right, b.bottom});
+    }
+    // No refine text: return pre-detections without useless crop encodes.
+    const auto plan = input.text_prompts.empty() ? sam3::refine::CropPlan{} :
+        sam3::refine::plan_crops(seed_boxes, input.image.cols, input.image.rows, input.crop_config);
+    stats.candidate_crops = plan.candidate_count;
+    stats.limited = plan.limited;
+    stats.crop_plan_ms = now_ms() - t;
+
+    t = now_ms();
+    stage.text_prompts = input.text_prompts;
+    stage.confidence_threshold = input.confidence_threshold;
+    for (const auto& crop : plan.crops)
+    {
+        const int x = static_cast<int>(crop.x1), y = static_cast<int>(crop.y1);
+        const int w = static_cast<int>(crop.x2) - x, h = static_cast<int>(crop.y2) - y;
+        // ROI is a view; VisionModel resizes into a contiguous AIPP uint8 buffer.
+        stage.image = input.image(cv::Rect(x, y, w, h));
+        encode(stage.image);
+        auto local = decode_current_image(stage, true);
+        for (auto& det : local)
+        {
+            // postprocess already clips boxes/masks to ROI dimensions. Integer
+            // translation preserves bbox-relative mask origin and dimensions.
+            det.box.left += x; det.box.right += x;
+            det.box.top += y; det.box.bottom += y;
+            results.push_back(std::move(det));
+        }
+        ++stats.crops_processed;
+    }
+    stats.crop_refine_ms = now_ms() - t;
+
+    t = now_ms();
+    std::vector<sam3::refine::Rect> boxes;
+    std::vector<float> scores;
+    std::vector<std::string> labels;
+    for (const auto& det : results)
+    {
+        boxes.push_back({det.box.left, det.box.top, det.box.right, det.box.bottom});
+        scores.push_back(det.score); labels.push_back(det.class_name);
+    }
+    object::DetectionBoxArray kept;
+    for (size_t idx : sam3::refine::nms_indices(boxes, scores, labels))
+        kept.push_back(std::move(results[idx]));
+    stats.nms_ms = now_ms() - t;
+    stats.total_ms = now_ms() - started;
+    std::cout << "[Refine] pre_detections=" << stats.pre_detections
+              << " candidate_crops=" << stats.candidate_crops << " crops=" << stats.crops_processed
+              << " limited=" << stats.limited << " merge=" << input.merge_results
+              << " pre_ms=" << stats.pre_detect_ms << " full_ms=" << stats.full_refine_ms
+              << " plan_ms=" << stats.crop_plan_ms << " crops_ms=" << stats.crop_refine_ms
+              << " nms_ms=" << stats.nms_ms << " total_ms=" << stats.total_ms << std::endl;
+    return kept;
 }
 
 object::DetectionBoxArray Sam3Infer::postprocess(const cv::Mat& original_image,
