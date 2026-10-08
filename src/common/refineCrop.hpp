@@ -1,15 +1,16 @@
 #pragma once
 
-// Independently implemented CPU crop clustering; no TensorRT/CUDA dependency.
-// The knobs follow the upstream obj-refine API, but crops are not guaranteed
-// to be identical to upstream OmniCrop's iterative optimizer.
+// Thin Ascend adapter around the pinned, unmodified upstream OmniCrop core.
+// Validation and request budgets stay outside the clustering algorithm.
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "third_party/omnicrop/OmniCrop.hpp"
 
 namespace sam3::refine
 {
@@ -47,37 +48,12 @@ struct Rect
     float area() const { return width() * height(); }
 };
 
-inline Rect unite(const Rect& a, const Rect& b)
-{
-    return {std::min(a.x1, b.x1), std::min(a.y1, b.y1),
-            std::max(a.x2, b.x2), std::max(a.y2, b.y2)};
-}
-
 inline float iou(const Rect& a, const Rect& b)
 {
     const float inter = std::max(0.0f, std::min(a.x2, b.x2) - std::max(a.x1, b.x1)) *
                         std::max(0.0f, std::min(a.y2, b.y2) - std::max(a.y1, b.y1));
     const float total = a.area() + b.area() - inter;
     return total > 0 ? inter / total : 0.0f;
-}
-
-inline Rect finalize(const Rect& box, int width, int height, const CropConfig& cfg)
-{
-    float w = box.width() + 2.0f * cfg.padding;
-    float h = box.height() + 2.0f * cfg.padding;
-    if (cfg.enable_ar_fix)
-    {
-        w = std::max(w, h * cfg.target_ar);
-        h = std::max(h, w / cfg.target_ar);
-    }
-    // max_size limits expansion/merging, never cuts off a large seed object.
-    w = std::min(static_cast<float>(width), std::max(box.width(), std::min(w, float(cfg.max_size))));
-    h = std::min(static_cast<float>(height), std::max(box.height(), std::min(h, float(cfg.max_size))));
-    const float x = std::clamp((box.x1 + box.x2 - w) * 0.5f, 0.0f, float(width) - w);
-    const float y = std::clamp((box.y1 + box.y2 - h) * 0.5f, 0.0f, float(height) - h);
-    // Cover every seed pixel; these integer bounds are also used for offsets.
-    return {std::floor(x), std::floor(y), std::min(float(width), std::ceil(x + w)),
-            std::min(float(height), std::ceil(y + h))};
 }
 
 struct CropPlan
@@ -87,68 +63,36 @@ struct CropPlan
     bool limited = false;
 };
 
-// Input ordered by confidence: under the budget, lower-confidence clusters
-// are skipped explicitly (reported by CropPlan::limited), never silently.
+// Preserve caller order. The inference caller ranks seeds by confidence so
+// budgets prioritize higher-confidence subjects. Without truncation, crops
+// are exactly the upstream engine's floating-point output for these seeds.
 inline CropPlan plan_crops(const std::vector<Rect>& ranked_boxes, int width, int height,
                            const CropConfig& cfg)
 {
     cfg.validate();
     if (width < 1 || height < 1) throw std::invalid_argument("Invalid image size");
-    std::vector<Rect> seeds;
+    std::vector<omnicrop::BBox> seeds;
     for (const auto& b : ranked_boxes)
     {
         if (!std::isfinite(b.x1) || !std::isfinite(b.y1) ||
             !std::isfinite(b.x2) || !std::isfinite(b.y2)) continue;
         Rect r{std::clamp(b.x1, 0.0f, float(width)), std::clamp(b.y1, 0.0f, float(height)),
                std::clamp(b.x2, 0.0f, float(width)), std::clamp(b.y2, 0.0f, float(height))};
-        if (r.area() > 0) seeds.push_back(r);
+        if (r.area() > 0) seeds.emplace_back(r.x1, r.y1, r.x2, r.y2);
     }
     CropPlan plan;
     plan.limited = seeds.size() > static_cast<size_t>(cfg.max_pre_detections);
     if (plan.limited) seeds.resize(cfg.max_pre_detections);
-    // Greedy agglomeration balances normalized expansion/distance costs
-    // against a per-crop penalty. Earliest/highest-confidence seed wins order.
-    while (seeds.size() > 1)
-    {
-        size_t best_i = 0, best_j = 0;
-        float best = std::numeric_limits<float>::infinity();
-        for (size_t i = 0; i < seeds.size(); ++i)
-            for (size_t j = i + 1; j < seeds.size(); ++j)
-            {
-                const Rect joined = unite(seeds[i], seeds[j]);
-                if (joined.width() > cfg.max_size || joined.height() > cfg.max_size) continue;
-                const float dx = (seeds[i].x1 + seeds[i].x2 - seeds[j].x1 - seeds[j].x2) * 0.5f;
-                const float dy = (seeds[i].y1 + seeds[i].y2 - seeds[j].y1 - seeds[j].y2) * 0.5f;
-                const float diagonal = joined.width() * joined.width() + joined.height() * joined.height();
-                const float expansion = joined.area() / std::max(1.0f, seeds[i].area() + seeds[j].area());
-                const float cost = cfg.w_diou * (dx * dx + dy * dy) / std::max(1.0f, diagonal) +
-                                   cfg.w_expansion * std::max(0.0f, expansion - 1.0f) - cfg.count_penalty;
-                if (cost < best && cost <= 0) { best = cost; best_i = i; best_j = j; }
-            }
-        if (best_j == best_i) break;
-        seeds[best_i] = unite(seeds[best_i], seeds[best_j]);
-        seeds.erase(seeds.begin() + best_j);
-    }
-    for (const auto& seed : seeds) plan.crops.push_back(finalize(seed, width, height, cfg));
-    // Merge overlapping expanded crops when the union remains within budget.
-    bool changed = true;
-    while (changed)
-    {
-        changed = false;
-        for (size_t i = 0; i < plan.crops.size() && !changed; ++i)
-            for (size_t j = i + 1; j < plan.crops.size(); ++j)
-            {
-                const Rect joined = unite(plan.crops[i], plan.crops[j]);
-                if (iou(plan.crops[i], plan.crops[j]) > cfg.nms_threshold &&
-                    joined.width() <= cfg.max_size && joined.height() <= cfg.max_size)
-                {
-                    plan.crops[i] = joined;
-                    plan.crops.erase(plan.crops.begin() + j);
-                    changed = true;
-                    break;
-                }
-            }
-    }
+    omnicrop::Config upstream;
+    upstream.w_diou = cfg.w_diou;
+    upstream.w_expansion = cfg.w_expansion;
+    upstream.crop_count_penalty = cfg.count_penalty;
+    upstream.nms_threshold = cfg.nms_threshold;
+    upstream.enable_aspect_ratio_fix = cfg.enable_ar_fix;
+    upstream.target_aspect_ratio = cfg.target_ar;
+    omnicrop::OmniCropEngine engine(cfg.max_size, cfg.padding);
+    for (const auto& crop : engine.cluster_and_crop(seeds, width, height, upstream))
+        plan.crops.push_back({crop.x1, crop.y1, crop.x2, crop.y2});
     plan.candidate_count = static_cast<int>(plan.crops.size());
     if (plan.crops.size() > static_cast<size_t>(cfg.max_crops))
     {
@@ -156,6 +100,27 @@ inline CropPlan plan_crops(const std::vector<Rect>& ranked_boxes, int width, int
         plan.limited = true;
     }
     return plan;
+}
+
+struct CropRoi
+{
+    int x = 0, y = 0, width = 0, height = 0;
+    bool valid() const { return width > 0 && height > 0; }
+};
+
+// Match TRT: truncate origin and extent separately, not floor/ceil endpoints.
+// Use this same helper for both logging and the actual OpenCV ROI extraction.
+inline CropRoi crop_roi(const Rect& crop, int image_width, int image_height)
+{
+    if (image_width < 1 || image_height < 1 ||
+        !std::isfinite(crop.x1) || !std::isfinite(crop.y1) ||
+        !std::isfinite(crop.x2) || !std::isfinite(crop.y2)) return {};
+    CropRoi roi;
+    roi.x = static_cast<int>(std::clamp(double(crop.x1), 0.0, double(image_width)));
+    roi.y = static_cast<int>(std::clamp(double(crop.y1), 0.0, double(image_height)));
+    roi.width = std::min(static_cast<int>(std::min(double(crop.width()), double(image_width))), image_width - roi.x);
+    roi.height = std::min(static_cast<int>(std::min(double(crop.height()), double(image_height))), image_height - roi.y);
+    return roi;
 }
 
 // Same-class detection NMS; indices let callers keep masks attached to boxes.

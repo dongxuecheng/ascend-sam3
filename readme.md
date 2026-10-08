@@ -774,8 +774,16 @@ python3 scripts/benchmark_service.py \
 → 每个裁剪区域精细检测 → 恢复原图坐标 → 按类别进行 IoU=0.5 的 NMS。
 每个裁剪区域内的多个文本提示共用一次视觉编码，文本特征沿用现有缓存。
 裁剪使用 CPU/OpenCV，模型推理仍走 ACL/AIPP；没有引入 CUDA/TensorRT。
-裁剪聚合是独立实现，不直接复制上游代码；参数兼容，但不保证与上游
-OmniCrop 的裁剪区域逐个一致，也不保证不同推理后端结果数值完全一致。
+裁剪聚合直接使用与 TRT 同源的 [OmniCrop C++ 核心](https://github.com/leon0514/OmniCrop)，
+固定版本 `e9faf56f45df2ee69d028dfaa91b17b6b806b8dd`，位于
+`src/third_party/omnicrop/OmniCrop.hpp`。输入校验和预算限制由 Ascend 适配层执行；
+未触及预算时，相同且同序的预检测框、图像尺寸、裁剪参数会得到同一算法的浮点裁剪框。
+来源与上游 MIT 许可证声明记录在同目录 `NOTICE.md`，也随运行镜像分发。
+不额外安装 Python omnicrop 包，不修改现有 OM；Mask 解码、图像采样和模型数值
+仍使用当前 Ascend 路径，因此不能保证最终检测/分割结果与 TRT 完全一致。
+
+该头文件随 `src/` 在业务代码阶段编译，不会因接入 OmniCrop 而使
+tokenizers/SentencePiece/Abseil 的独立依赖构建缓存失效。
 
 **更新后必须构建新镜像**（仅重启旧镜像不会增加接口）：
 
@@ -804,7 +812,7 @@ curl -fsS http://127.0.0.1:18000/predict-obj-refine/file \
   -F 'pre_detect_confidence=0.2' \
   -F 'merge_results=true' \
   -F 'return_mask=true' \
-  -F 'crop_config_json={"max_crops":2,"max_size":640,"padding":20}'
+  -F 'crop_config_json={"max_crops":4,"max_size":640,"padding":20}'
 ```
 
 JSON 接口兼容上游的字段名（不同于旧 `/predict` 的 `image`/`class_names`）：
@@ -817,7 +825,7 @@ JSON 接口兼容上游的字段名（不同于旧 `/predict` 的 `image`/`class
   "prompts": [{"text": "helmet"}, {"text": "vest"}],
   "return_mask": true,
   "merge_results": true,
-  "crop_config": {"max_crops": 2, "max_size": 640, "padding": 20}
+  "crop_config": {"max_crops": 4, "max_size": 640, "padding": 20}
 }
 ```
 
@@ -867,6 +875,38 @@ SAM3_REFINE_MAX_PRE_DETECTIONS=64
 超过预检测预算时优先用高置信度主体框；超过裁剪预算时优先用包含高置信度
 主体的区域。被跳过的区域不执行局部推理，响应 `limited=true` 明确告知降级。
 `merge_results=true` 时仍保留原图精细检测，但不能代替被跳过区域的放大检测。
+
+##### OmniCrop 裁剪坐标日志
+
+每次目标细化请求均打印 `[OmniCrop]` 日志。`output_crops` 是引擎生成的候选数，
+`selected_crops` 是预算截断后选中的区域数，`limited=1` 表示触及预算。
+`pid` 区分不同 Uvicorn worker；`crop[i]` 是浮点裁剪框，`roi[i]` 是真正传入
+OpenCV 的整数采样区域。整数原点和宽高分别截断，对齐 TRT 的取整方式，
+并做图像边界检查；不足一个像素的无效区域会标记 `valid=0` 并跳过。
+这些日志不表示已经成功完成该区域的推理，最终完成数量以 `[Refine] crops=`
+及响应 `refinement.crops_processed` 为准。
+
+```text
+[OmniCrop] pid=100 input_boxes=8 output_crops=3 selected_crops=3 limited=0 image=1920x1080 max_size=640 max_crops=4
+[OmniCrop] pid=100 crop[0]: x1=267.744, y1=255.801, x2=462.256, y2=450.312, w=194.512, h=194.512
+[OmniCrop] pid=100 roi[0]: x=267, y=255, w=194, h=194, x2=461, y2=449, valid=1
+```
+
+上例是固定 TRT 预检测框的参考值。实际昇腾模型的人员框存在微小数值差异，
+裁剪坐标和顺序可能略有不同；对比时按位置匹配，不要只按 `crop[i]` 下标比较。
+复现此场景时请求 `max_crops` 至少为 3（默认 4），不要沿用旧示例的 2。
+
+```bash
+# 多实例：发起一次目标细化请求后，查看两个后端的日志
+docker-compose -f docker-compose.dual.yml logs --tail=200 sam3-npu2 sam3-npu3
+
+# 单实例
+docker-compose -f docker-compose.yml logs --tail=200 sam3-service
+
+# 无 NPU 的 C++ 回归测试：固定人员框、TRT 三个裁剪坐标、预算、边界与 NMS
+g++ -std=c++17 -O2 -Isrc tests/refine_crop_test.cpp -o /tmp/sam3-refine-crop-test
+/tmp/sam3-refine-crop-test
+```
 
 响应保留 `results`，额外增加 `refinement` 诊断信息：
 

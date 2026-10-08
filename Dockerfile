@@ -132,6 +132,7 @@ COPY service/requirements.txt /app/service/requirements.txt
 RUN pip3 install --no-cache-dir -r /app/service/requirements.txt
 COPY service /app/service
 COPY --from=builder /app/ascendsam3*.so /app/
+COPY src/third_party/omnicrop/NOTICE.md /usr/share/doc/ascend-sam3/omnicrop/NOTICE.md
 
 # 暴露 FastAPI 服务端口
 EXPOSE 8000

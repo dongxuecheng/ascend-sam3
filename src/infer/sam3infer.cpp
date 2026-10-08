@@ -6,7 +6,10 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
+#include <unistd.h>
 
 static double now_ms()
 {
@@ -585,13 +588,37 @@ object::DetectionBoxArray Sam3Infer::forward_refine(Sam3Input& input)
     stats.limited = plan.limited;
     stats.crop_plan_ms = now_ms() - t;
 
+    // Assemble one block so multiple Uvicorn workers' crop lines are less
+    // likely to interleave. PID identifies the serving native model process.
+    std::vector<sam3::refine::CropRoi> crop_rois;
+    std::ostringstream crop_log;
+    crop_log << std::fixed << std::setprecision(3);
+    crop_log << "[OmniCrop] pid=" << getpid() << " input_boxes=" << seed_boxes.size()
+             << " output_crops=" << plan.candidate_count << " selected_crops=" << plan.crops.size()
+             << " limited=" << plan.limited << " image=" << input.image.cols << 'x' << input.image.rows
+             << " max_size=" << input.crop_config.max_size << " max_crops=" << input.crop_config.max_crops << '\n';
+    for (size_t i = 0; i < plan.crops.size(); ++i)
+    {
+        const auto& crop = plan.crops[i];
+        crop_rois.push_back(sam3::refine::crop_roi(crop, input.image.cols, input.image.rows));
+        const auto& roi = crop_rois.back();
+        crop_log << "[OmniCrop] pid=" << getpid() << " crop[" << i << "]: x1=" << crop.x1
+                 << ", y1=" << crop.y1 << ", x2=" << crop.x2 << ", y2=" << crop.y2
+                 << ", w=" << crop.width() << ", h=" << crop.height() << '\n';
+        crop_log << "[OmniCrop] pid=" << getpid() << " roi[" << i << "]: x=" << roi.x
+                 << ", y=" << roi.y << ", w=" << roi.width << ", h=" << roi.height
+                 << ", x2=" << roi.x + roi.width << ", y2=" << roi.y + roi.height
+                 << ", valid=" << roi.valid() << '\n';
+    }
+    std::cout << crop_log.str() << std::flush;
+
     t = now_ms();
     stage.text_prompts = input.text_prompts;
     stage.confidence_threshold = input.confidence_threshold;
-    for (const auto& crop : plan.crops)
+    for (const auto& roi : crop_rois)
     {
-        const int x = static_cast<int>(crop.x1), y = static_cast<int>(crop.y1);
-        const int w = static_cast<int>(crop.x2) - x, h = static_cast<int>(crop.y2) - y;
+        if (!roi.valid()) continue;
+        const int x = roi.x, y = roi.y, w = roi.width, h = roi.height;
         // ROI is a view; VisionModel resizes into a contiguous AIPP uint8 buffer.
         stage.image = input.image(cv::Rect(x, y, w, h));
         encode(stage.image);
