@@ -10,7 +10,8 @@
 /**
  * @brief SAM3 Vision Encoder
  *
- * 输入：images [1,3,1008,1008] float32（也兼容 YUV420SP 带 AIPP 的 OM）
+ * 输入：带静态 AIPP 的 images [1,1008,1008,3] uint8 BGR。
+ * ONNX 中输入为 NCHW float32；RGB 交换和归一化由 OM 的 AIPP 完成。
  * 输出：fpn_feat_0、fpn_feat_1、fpn_feat_2；部分导出版本还包含 fpn_pos_2
  *
  * 注意：运行时统一使用外部 fpn_pos_2_constant.npy；Vision Encoder 中可选的
@@ -29,6 +30,10 @@ class VisionModel : public AclModel
      */
     aclError encode(const cv::Mat& image);
 
+    // Sample the crop directly from the full image, matching TRT's
+    // CropResizeMatrix and original-image border behavior.
+    aclError encode_crop(const cv::Mat& image, const cv::Rect& crop);
+
     /**
      * @brief 获取第 idx 个输出的 NPU 显存地址
      *        有效索引为 0(fpn_feat_0)、1(fpn_feat_1)、2(fpn_feat_2)。
@@ -36,7 +41,8 @@ class VisionModel : public AclModel
     void* feature_ptr(size_t idx) const;
 
   private:
-    aclError preprocess_bgr(const cv::Mat& image);
+    aclError encode_impl(const cv::Mat& image, const cv::Rect* crop);
+    aclError preprocess_bgr(const cv::Mat& image, const cv::Rect* crop);
     int input_h_ = 1008;
     int input_w_ = 1008;
 };

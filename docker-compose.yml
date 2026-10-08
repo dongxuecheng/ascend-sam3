@@ -22,7 +22,7 @@ services:
     environment:
       # devices 已将容器限制为单张物理卡，应用使用容器内索引 0。
       ASCEND_DEVICE_ID: "${ASCEND_LOGICAL_DEVICE_ID:-0}"
-      VISION_MODEL: models/om-models/vision-encoder.om
+      VISION_MODEL: "${VISION_MODEL:-models/om-models/vision-encoder.om}"
       TEXT_MODEL: models/om-models/text-encoder.om
       DECODER_MODEL: models/om-models/decoder_static.om
       FPN_POS2: models/om-models/fpn_pos_2_constant.npy

@@ -39,7 +39,7 @@ services:
       SAM3_LISTEN_PORT: "${SAM3_BACKEND_A_PORT:-18001}"
       SAM3_REFINE_MAX_CROPS: "${SAM3_REFINE_MAX_CROPS:-4}"
       SAM3_REFINE_MAX_PRE_DETECTIONS: "${SAM3_REFINE_MAX_PRE_DETECTIONS:-64}"
-      VISION_MODEL: models/om-models/vision-encoder.om
+      VISION_MODEL: "${VISION_MODEL:-models/om-models/vision-encoder.om}"
       TEXT_MODEL: models/om-models/text-encoder.om
       DECODER_MODEL: models/om-models/decoder_static.om
       FPN_POS2: models/om-models/fpn_pos_2_constant.npy
@@ -87,7 +87,7 @@ services:
       SAM3_LISTEN_PORT: "${SAM3_BACKEND_B_PORT:-18002}"
       SAM3_REFINE_MAX_CROPS: "${SAM3_REFINE_MAX_CROPS:-4}"
       SAM3_REFINE_MAX_PRE_DETECTIONS: "${SAM3_REFINE_MAX_PRE_DETECTIONS:-64}"
-      VISION_MODEL: models/om-models/vision-encoder.om
+      VISION_MODEL: "${VISION_MODEL:-models/om-models/vision-encoder.om}"
       TEXT_MODEL: models/om-models/text-encoder.om
       DECODER_MODEL: models/om-models/decoder_static.om
       FPN_POS2: models/om-models/fpn_pos_2_constant.npy

@@ -1,6 +1,7 @@
 #include "infer/sam3infer.hpp"
 #include "common/npy_utils.hpp"
 #include "common/object.hpp"
+#include "common/trtSampling.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -195,6 +196,10 @@ bool Sam3Infer::initialize()
             return false;
         }
     }
+    std::cout << "TRT-compatible sampling enabled: full-image half-pixel resize, "
+              << "crop warp from original image, raw mask > 0.5 (all components). "
+              << "AIPP normalization is baked into Vision OM; use the updated vision.cfg."
+              << std::endl;
     // Some SAM3 ONNX exports retain fpn_pos_2 as the fourth Vision output.
     // The runtime intentionally keeps using the external, validated constant .npy
     // so both the 3-output and 4-output export variants follow the same path.
@@ -540,8 +545,8 @@ object::DetectionBoxArray Sam3Infer::forward_refine(Sam3Input& input)
         throw std::invalid_argument("Invalid obj-refine confidence threshold");
     auto& stats = input.refine_stats;
     stats = RefineStats{};
-    auto encode = [&](const cv::Mat& image) {
-        const aclError ret = vision_model_->encode(image);
+    auto encode = [&](const cv::Mat& image, const cv::Rect* crop = nullptr) {
+        const aclError ret = crop ? vision_model_->encode_crop(image, *crop) : vision_model_->encode(image);
         if (ret != ACL_SUCCESS)
             throw std::runtime_error("obj-refine vision encoder failed: " + std::to_string(ret));
     };
@@ -619,9 +624,12 @@ object::DetectionBoxArray Sam3Infer::forward_refine(Sam3Input& input)
     {
         if (!roi.valid()) continue;
         const int x = roi.x, y = roi.y, w = roi.width, h = roi.height;
-        // ROI is a view; VisionModel resizes into a contiguous AIPP uint8 buffer.
-        stage.image = input.image(cv::Rect(x, y, w, h));
-        encode(stage.image);
+        // Decode in local ROI coordinates, but sample Vision input from the
+        // FULL image. Near a crop's right/bottom edge TRT may read the next
+        // original-image pixel, not a clamped pixel from an extracted ROI.
+        const cv::Rect crop(x, y, w, h);
+        stage.image = input.image(crop);
+        encode(input.image, &crop);
         auto local = decode_current_image(stage, true);
         for (auto& det : local)
         {
@@ -703,25 +711,6 @@ object::DetectionBoxArray Sam3Infer::postprocess(const cv::Mat& original_image,
     std::sort(score_indices.begin(), score_indices.end(),
               [](const auto& a, const auto& b) { return a.first > b.first; });
 
-    // 批量 CANN mask 解码；失败时回退到单张 CPU/OpenCV 解码
-    std::vector<int> indices;
-    indices.reserve(score_indices.size());
-    for (const auto& [score, idx] : score_indices)
-    {
-        indices.push_back(idx);
-    }
-
-    std::vector<cv::Mat> cann_masks;
-    bool cann_mask_ok = false;
-    if (cann_mask_ok && need_mask && !indices.empty())
-    {
-        // cann_mask_ok = mask_postprocess_.process(pred_masks_buf, indices, orig_h, orig_w, cann_masks);
-        if (!cann_mask_ok)
-        {
-            std::cerr << "CANN mask postprocess failed, fallback to CPU" << std::endl;
-        }
-    }
-
     for (size_t i = 0; i < score_indices.size(); ++i)
     {
         const auto& [score, idx] = score_indices[i];
@@ -743,77 +732,25 @@ object::DetectionBoxArray Sam3Infer::postprocess(const cv::Mat& original_image,
         det.class_id   = 0;
         det.class_name = class_name.empty() ? "object" : class_name;
 
-        // 解码 mask：复制 -> 阈值 -> resize 到原图 -> 裁剪到目标框
+        // TRT-compatible box-relative mask: sample the full 288x288 logits
+        // with the global half-pixel affine + integer box origin, then >0.5.
         if (need_mask)
         {
-            cv::Mat resized_mask;
-            bool have_mask = false;
-
-            if (cann_mask_ok && i < cann_masks.size())
-            {
-                resized_mask = cann_masks[i];
-                have_mask    = true;
-            }
-            else
-            {
-                std::vector<float> mask_raw(MASK_SIZE * MASK_SIZE);
-                CHECK_ACL(aclrtMemcpy(mask_raw.data(), mask_bytes,
-                                    static_cast<char*>(pred_masks_buf) + idx * mask_bytes,
-                                    mask_bytes,
-                                    ACL_MEMCPY_DEVICE_TO_HOST));
-
-                // 2. 计算原图尺度下的目标 ROI 坐标
-                int roi_x = static_cast<int>(std::max(0.0f, x1));
-                int roi_y = static_cast<int>(std::max(0.0f, y1));
-                int roi_w = static_cast<int>(std::min(static_cast<float>(orig_w), x2)) - roi_x;
-                int roi_h = static_cast<int>(std::min(static_cast<float>(orig_h), y2)) - roi_y;
-
-                if (roi_w > 0 && roi_h > 0)
-                {
-                    // 3. 计算原图到低分辨率 mask 空间的缩放比例
-                    float scale_x = (float)MASK_SIZE / orig_w;
-                    float scale_y = (float)MASK_SIZE / orig_h;
-
-                    // 4. 将原图的 ROI 映射回 288x288 的低分辨率空间
-                    int low_x = static_cast<int>(std::round(roi_x * scale_x));
-                    int low_y = static_cast<int>(std::round(roi_y * scale_y));
-                    int low_w = static_cast<int>(std::round((roi_x + roi_w) * scale_x)) - low_x;
-                    int low_h = static_cast<int>(std::round((roi_y + roi_h) * scale_y)) - low_y;
-
-                    // 边界安全防护：防止浮点误差导致越界
-                    low_x = std::max(0, std::min(low_x, MASK_SIZE - 1));
-                    low_y = std::max(0, std::min(low_y, MASK_SIZE - 1));
-                    low_w = std::max(1, std::min(low_w, MASK_SIZE - low_x));
-                    low_h = std::max(1, std::min(low_h, MASK_SIZE - low_y));
-
-                    cv::Rect low_roi(low_x, low_y, low_w, low_h);
-
-                    // 5. 截取低分辨率下的目标局部 Mask
-                    cv::Mat mask_mat(MASK_SIZE, MASK_SIZE, CV_32FC1, mask_raw.data());
-                    cv::Mat cropped_low = mask_mat(low_roi).clone(); // 使用 clone 拷贝数据
-
-                    // 6. 仅对该局部区域使用稳定的 cv::resize 进行放大
-                    cv::Mat resized_float;
-                    cv::resize(cropped_low, resized_float, cv::Size(roi_w, roi_h), 0, 0, cv::INTER_LINEAR);
-
-                    // 7. 二值化
-                    cv::Mat binary_mask;
-                    cv::threshold(resized_float, binary_mask, 0.0f, 255.0f, cv::THRESH_BINARY);
-
-                    // 8. 封装结果
-                    object::Segmentation seg;
-                    binary_mask.convertTo(seg.mask, CV_8UC1);
-                    seg.keep_largest_part();
-                    det.segmentation = seg;
-                }
-            }
-
-            if (have_mask)
-            {
-                // seg.mask = resized_mask.clone();
-                // seg.keep_largest_part();
-                // det.segmentation = seg;
-            }
+            std::vector<float> mask_raw(MASK_SIZE * MASK_SIZE);
+            CHECK_ACL(aclrtMemcpy(mask_raw.data(), mask_bytes,
+                                static_cast<char*>(pred_masks_buf) + idx * mask_bytes,
+                                mask_bytes, ACL_MEMCPY_DEVICE_TO_HOST));
+            const int roi_x = static_cast<int>(x1), roi_y = static_cast<int>(y1);
+            const int roi_w = std::max(1, static_cast<int>(x2) - roi_x);
+            const int roi_h = std::max(1, static_cast<int>(y2) - roi_y);
+            const auto matrix = sam3::trt::mask_inverse(MASK_SIZE, MASK_SIZE, orig_w, orig_h, roi_x, roi_y);
+            object::Segmentation seg;
+            seg.mask.create(roi_h, roi_w, CV_8UC1);
+            sam3::trt::warp_mask_rows(mask_raw.data(), MASK_SIZE, MASK_SIZE,
+                                     seg.mask.data, seg.mask.step[0], roi_w, matrix, 0, roi_h);
+            // Preserve all components and holes, matching TRT. Do not run
+            // keep_largest_part(), which also fills holes with drawContours.
+            det.segmentation = seg;
         }
 
         boxes.push_back(det);

@@ -1,4 +1,5 @@
 #include "infer/modelVision.hpp"
+#include "common/trtSampling.hpp"
 #include <chrono>
 #include <iostream>
 
@@ -10,15 +11,29 @@ static double now_ms()
 
 aclError VisionModel::encode(const cv::Mat& image)
 {
-    if (image.empty())
+    return encode_impl(image, nullptr);
+}
+
+aclError VisionModel::encode_crop(const cv::Mat& image, const cv::Rect& crop)
+{
+    if (crop.x < 0 || crop.y < 0 || crop.width <= 0 || crop.height <= 0 ||
+        crop.x > image.cols || crop.y > image.rows ||
+        crop.width > image.cols - crop.x || crop.height > image.rows - crop.y)
+        return ACL_ERROR_INVALID_PARAM;
+    return encode_impl(image, &crop);
+}
+
+aclError VisionModel::encode_impl(const cv::Mat& image, const cv::Rect* crop)
+{
+    if (image.empty() || image.type() != CV_8UC3)
     {
-        std::cerr << "VisionModel encode got empty image" << std::endl;
+        std::cerr << "VisionModel requires a non-empty BGR uint8 image" << std::endl;
         return ACL_ERROR_INVALID_PARAM;
     }
 
     aclError ret;
     double t0 = now_ms();
-    ret = preprocess_bgr(image);
+    ret = preprocess_bgr(image, crop);
 
     if (ret != ACL_SUCCESS)
     {
@@ -46,10 +61,18 @@ void* VisionModel::feature_ptr(size_t idx) const
     return output_buffer(idx);
 }
 
-aclError VisionModel::preprocess_bgr(const cv::Mat& image)
+aclError VisionModel::preprocess_bgr(const cv::Mat& image, const cv::Rect* crop)
 {
-    cv::Mat resized;
-    cv::resize(image, resized, cv::Size(input_w_, input_h_));
+    cv::Mat resized(input_h_, input_w_, CV_8UC3);
+    const auto matrix = crop ?
+        sam3::trt::crop_inverse(crop->x, crop->y, crop->width, crop->height, input_w_, input_h_) :
+        sam3::trt::resize_inverse(image.cols, image.rows, input_w_, input_h_);
+    // Do not use cv::warpAffine: its interpolation table quantizes fractions.
+    // Use float bilinear weights, uint8 rounding and border=114 as TRT does.
+    cv::parallel_for_(cv::Range(0, input_h_), [&](const cv::Range& rows) {
+        sam3::trt::warp_bgr_rows(image.data, image.step[0], image.cols, image.rows,
+                               resized.data, resized.step[0], input_w_, matrix, rows.start, rows.end);
+    });
     size_t data_size = resized.total() * resized.elemSize(); // 1008 * 1008 * 3
 
     // 当前预处理依赖 OM 中的静态 AIPP，外部输入必须是 RGB888/BGR uint8。

@@ -4,6 +4,7 @@
 #   ./scripts/convert_models.sh
 #   SOC_VERSION=Ascend310P3 ./scripts/convert_models.sh
 #   FORCE=1 ./scripts/convert_models.sh   # 强制重新转换（覆盖已有 .om）
+#   ONLY_MODEL=vision-encoder VISION_OUTPUT_NAME=vision-encoder-trt ./scripts/convert_models.sh
 
 set -euo pipefail
 
@@ -16,6 +17,17 @@ if [ -f "${PROJECT_ROOT}/.env" ]; then
 fi
 SOC_VERSION="${SOC_VERSION:-Ascend310P3}"
 FORCE="${FORCE:-0}"
+ONLY_MODEL="${ONLY_MODEL:-all}"
+VISION_OUTPUT_NAME="${VISION_OUTPUT_NAME:-vision-encoder}"
+case "${ONLY_MODEL}" in
+    all) MODELS=(vision-encoder text-encoder decoder_static) ;;
+    vision-encoder|text-encoder|decoder_static) MODELS=("${ONLY_MODEL}") ;;
+    *) echo "错误：ONLY_MODEL 必须是 all、vision-encoder、text-encoder 或 decoder_static"; exit 1 ;;
+esac
+if [[ ! "${VISION_OUTPUT_NAME}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || [[ "${VISION_OUTPUT_NAME}" == *.om ]]; then
+    echo "错误：VISION_OUTPUT_NAME 必须是模型文件名（不含目录和 .om 扩展名）"
+    exit 1
+fi
 
 IMAGE="${CANN_IMAGE:-swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-310p-ubuntu22.04-py3.11}"
 MODEL_DIR="/app/models"
@@ -23,11 +35,12 @@ MODEL_DIR="/app/models"
 echo "======================================"
 echo "模型转换环境：Docker + ${IMAGE}"
 echo "目标 SOC：${SOC_VERSION}"
+echo "转换模型：${ONLY_MODEL}"
 echo "项目目录：${PROJECT_ROOT}"
 echo "======================================"
 
 # 检查 onnx 模型是否存在
-for model in vision-encoder text-encoder decoder_static; do
+for model in "${MODELS[@]}"; do
     if [ ! -f "${PROJECT_ROOT}/models/onnx-models/${model}.onnx" ]; then
         echo "错误：models/onnx-models/${model}.onnx 不存在"
         exit 1
@@ -49,6 +62,9 @@ run_atc() {
     local onnx_path=$2
     local output=$3
     shift 3
+    if [ "${ONLY_MODEL}" != "all" ] && [ "${ONLY_MODEL}" != "${onnx_path%.onnx}" ]; then
+        return 0
+    fi
     local output_file="${PROJECT_ROOT}/models/om-models/${output}.om"
 
     if [ "${FORCE}" != "1" ] && [ -f "${output_file}" ]; then
@@ -78,7 +94,7 @@ run_atc "Text Encoder" "text-encoder.onnx" "text-encoder" \
     --input_shape="input_ids:1,32;attention_mask:1,32"
 
 # Vision Encoder（最后转换，静态 AIPP 将 BGR uint8 输入交换为 RGB 并归一化）
-run_atc "Vision Encoder" "vision-encoder.onnx" "vision-encoder" \
+run_atc "Vision Encoder" "vision-encoder.onnx" "${VISION_OUTPUT_NAME}" \
     --input_format=NCHW \
     --input_shape="images:1,3,1008,1008" \
     --insert_op_conf="${MODEL_DIR}/config/vision.cfg"

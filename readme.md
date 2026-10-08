@@ -56,6 +56,9 @@
 | 输出 `fpn_feat_2` | `[1, 256, 72, 72]` | 多尺度特征 2 |
 | 可选输出 `fpn_pos_2` | `[1, 256, 72, 72]` | 兼容部分四输出导出版本；运行时仍使用外部 `.npy` |
 
+上表输入为 ONNX 规格。当前运行路径要求静态 AIPP OM，实际外部输入为
+`[1,1008,1008,3]` BGR uint8；AIPP 负责 BGR→RGB 和归一化。
+
 ### Text Encoder
 
 | 名称 | 形状 | 说明 |
@@ -97,8 +100,8 @@
 `Sam3Infer::postprocess` 的执行步骤：
 
 1. **CPU 筛选**：对 `pred_logits` / `presence_logits` 做 sigmoid，计算最终得分并排序，保留高于 `confidence_threshold` 的结果。
-2. **Mask 解码**：当前稳定路径将选中的 `288x288` mask D2H，然后使用 OpenCV 按目标框裁剪、插值和二值化。
-3. **CPU 裁剪与后处理**：按每张 mask 对应的检测框裁剪，并调用 `keep_largest_part()` 保留最大连通域。
+2. **Mask 解码**：将选中的完整 `288x288` 原始 mask D2H，使用 TRT 同语义的浮点双线性采样，直接生成框相对的局部掩码。全图缩放采用半像素中心对齐，采样矩阵加入检测框整数左上角；不先裁剪低分辨率 mask 再 resize。
+3. **二值化**：先插值再判断原始值 `> 0.5`，输出 0/255；不是 `sigmoid(mask) > 0.5`。越界采样为 0，保留所有连通区域和孔洞，不再调用 `keep_largest_part()`。
 
 `MaskPostprocessCann` 保留为后续优化入口，但当前版本未启用 aclnn 批量后处理。
 
@@ -111,6 +114,66 @@
 
 - `src/infer/maskPostprocessCann.hpp` / `src/infer/maskPostprocessCann.cpp`
 - `src/infer/sam3infer.cpp` 中的 `postprocess`
+- `src/common/trtSampling.hpp`：实际运行的图像/Mask 采样核心，无 ACL/OpenCV 依赖
+
+### TRT 同语义预处理与升级已有部署
+
+对齐参考固定为 [trt-sam3 提交 593b4ae](https://github.com/leon0514/trt-sam3/tree/593b4ae199c23e6a2042a7dff268c79a9904b253)，
+对应 `src/common/affine.hpp`、`src/kernels/preprocess.cu` 与 `Sam3Infer::postprocess`：
+
+- 原图：半像素中心对齐的双线性采样；图像边界填充值为 114。
+- 精细检测裁剪：使用不带半像素偏移的 `CropResizeMatrix`，直接从完整原图采样，
+  保留边缘邻近原图像素，不能替换成截取 ROI 后的 `cv::resize`。
+- 像素：浮点双线性加权后 `floor(value + 0.5)` 转成 BGR uint8；支持非连续源图像。
+- 归一化：AIPP 用 `mean=127`、`min=0.5`、`var_reci=1/127.5` 表达
+  `(pixel - 127.5) / 127.5`，与 TRT 的 `pixel / 127.5 - 1` 数学公式一致。
+  AIPP 的 FP16 系数与 CUDA/CPU 浮点执行仍可能有舍入差异，不承诺逐 bit 一致。
+
+这会影响普通检测和 obj-refine 的 Mask；无需修改 API 参数、框坐标或 RLE 协议。
+`return_mask=false` 仍跳过 Mask D2H 和解码，但不会移除 Decoder 的 Mask 计算分支。
+本次是输出语义对齐，不是性能优化，预处理耗时需要重新实测。
+
+**已有 OM 的 AIPP 是编译时固化的。只重建 Docker 镜像，不能让旧 OM 从减 128
+变成减 127.5。必须重转 Vision；Text、Decoder 和位置编码无需重转。**
+建议生成新名字，不覆盖仍可用于对照的原始 OM：
+
+```bash
+cd /root/ascend-sam3
+
+# 只检查/转换 Vision；不要设置 FORCE=1，默认保留已存在的输出。
+ONLY_MODEL=vision-encoder VISION_OUTPUT_NAME=vision-encoder-trt \
+  bash scripts/convert_models.sh
+```
+
+然后在 `.env` 中添加或修改（不要保留两个同名配置）：
+
+```dotenv
+VISION_MODEL=models/om-models/vision-encoder-trt.om
+```
+
+如果同名 `vision-encoder-trt.om` 是旧配置生成的，先备份，再用 `FORCE=1`
+重转这个 Vision 输出；默认脚本会跳过已存在的 OM，不会自动判断 AIPP 配置是否更新。
+
+选择与当前部署对应的一组命令，不要同时启动单实例和双设备版本：
+
+```bash
+# 双设备：两个后端共用同一个服务镜像。
+docker-compose -f docker-compose.dual.yml build sam3-npu2
+docker-compose -f docker-compose.dual.yml up -d --no-build --force-recreate
+docker-compose -f docker-compose.dual.yml logs --tail=100 sam3-npu2 sam3-npu3
+```
+
+```bash
+# 单实例。
+docker-compose -f docker-compose.yml build sam3-service
+docker-compose -f docker-compose.yml up -d --no-build --force-recreate
+docker-compose -f docker-compose.yml logs --tail=100 sam3-service
+```
+
+Compose V2 可将 `docker-compose` 换成 `docker compose`。确认日志 `Using models:`
+加载的是 `vision-encoder-trt.om`，且出现 `TRT-compatible sampling enabled`。
+兼容采样日志只证明新代码生效，不能单独证明已有 OM 的归一化已经更新。
+服务器仍需用相同图片、阈值和裁剪参数与 TRT 做最终检测/Mask 对照。
 
 ### 链接的 CANN 库
 
@@ -906,6 +969,25 @@ docker-compose -f docker-compose.yml logs --tail=200 sam3-service
 # 无 NPU 的 C++ 回归测试：固定人员框、TRT 三个裁剪坐标、预算、边界与 NMS
 g++ -std=c++17 -O2 -Isrc tests/refine_crop_test.cpp -o /tmp/sam3-refine-crop-test
 /tmp/sam3-refine-crop-test
+```
+
+TRT 图像/Mask 采样测试（运行实际 C++ 采样核心，包含 500 组随机对照与
+裁剪邻域、边界、半像素偏移、原始阈值、孔洞/多连通区域、源/目标 stride 测试）：
+
+```bash
+g++ -std=c++17 -Wall -Wextra -O2 -ffp-contract=off -Isrc \
+  tests/trt_sampling_test.cpp -o /tmp/sam3-trt-sampling-test
+/tmp/sam3-trt-sampling-test
+```
+
+批量保存最新框和 Mask RLE（阈值应改成你的 TRT 对照请求值）：
+
+```bash
+python3 scripts/benchmark_service.py --images test-images --mode obj-refine \
+  --pre-detect-label person --class-name helmet --confidence 0.3 \
+  --max-crops 4 --crop-max-size 640 --return-mask --save-results \
+  --concurrency 1 --rounds 1 --warmup 1 \
+  --label trt-aligned --json-output benchmark-trt-aligned.json
 ```
 
 响应保留 `results`，额外增加 `refinement` 诊断信息：
