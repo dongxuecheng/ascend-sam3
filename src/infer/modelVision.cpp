@@ -6,7 +6,7 @@
 static double now_ms()
 {
     using namespace std::chrono;
-    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
 }
 
 aclError VisionModel::encode(const cv::Mat& image)
@@ -32,6 +32,7 @@ aclError VisionModel::encode_impl(const cv::Mat& image, const cv::Rect* crop)
     }
 
     aclError ret;
+    timings_ = Timings{};
     double t0 = now_ms();
     ret = preprocess_bgr(image, crop);
 
@@ -50,9 +51,11 @@ aclError VisionModel::encode_impl(const cv::Mat& image, const cv::Rect* crop)
 
     synchronize();
     double t2 = now_ms();
-
-    std::cout << "[Time] Vision preprocess: " << (t1 - t0) << " ms, inference: " << (t2 - t1)
-              << " ms, total: " << (t2 - t0) << " ms" << std::endl;
+    timings_.inference_ms = t2 - t1;
+    timings_.total_ms = t2 - t0;
+    if (timing_log_)
+        std::cout << "[Time] Vision preprocess: " << (t1 - t0) << " ms, inference: " << (t2 - t1)
+                  << " ms, total: " << (t2 - t0) << " ms" << std::endl;
     return ACL_SUCCESS;
 }
 
@@ -63,6 +66,7 @@ void* VisionModel::feature_ptr(size_t idx) const
 
 aclError VisionModel::preprocess_bgr(const cv::Mat& image, const cv::Rect* crop)
 {
+    const double started = now_ms();
     cv::Mat resized(input_h_, input_w_, CV_8UC3);
     const auto matrix = crop ?
         sam3::trt::crop_inverse(crop->x, crop->y, crop->width, crop->height, input_w_, input_h_) :
@@ -85,7 +89,11 @@ aclError VisionModel::preprocess_bgr(const cv::Mat& image, const cv::Rect* crop)
         return ACL_ERROR_INVALID_PARAM;
     }
 
-    CHECK_ACL(aclrtMemcpy(input_buffer(0), input_size(0), resized.data, data_size,
-                          ACL_MEMCPY_HOST_TO_DEVICE));
+    const double sampled = now_ms();
+    const aclError ret = aclrtMemcpy(input_buffer(0), input_size(0), resized.data, data_size,
+                                    ACL_MEMCPY_HOST_TO_DEVICE);
+    timings_.sampling_ms = sampled - started;
+    timings_.upload_ms = now_ms() - sampled;
+    if (ret != ACL_SUCCESS) return ret;
     return ACL_SUCCESS;
 }

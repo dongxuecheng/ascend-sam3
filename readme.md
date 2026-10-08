@@ -13,6 +13,7 @@
 - [构建](#构建)
 - [运行](#运行)
 - [AOE 调优](#aoe-调优)
+- [Vision 独立基准与调优对比](#vision-独立基准与调优对比)
 - [模型转换](#模型转换)
 - [FastAPI 推理服务](#fastapi-推理服务)
 - [Docker 启动前准备](#docker-启动前准备)
@@ -239,14 +240,149 @@ ASCEND_DEVICE_ID=2 ./build/ascendsam3_demo models/om-models/vision-encoder.om mo
 
 ### Vision Encoder
 
+优先使用以下带设备校验、日志和知识库持久化的流程，而不是直接运行裸 `aoe` 命令。仅调优 Vision，不要求 Text/Decoder ONNX，也不会修改 `.env` 或自动切换服务模型。
+
+## Vision 独立基准与调优对比
+
+新增 `ascendsam3_vision_bench` 和 `scripts/benchmark_vision.py`：只加载 Vision OM，走与服务相同的 TRT 对齐采样和静态 AIPP，排除 Text、Decoder、HTTP、Mask/RLE 开销。
+
+### 1. 构建工具并让测试设备空闲
+
+在服务器项目目录中执行。下面以宿主机物理 **device 2**、容器内逻辑 **device 0** 为例；实际设备不同则修改 `--device`。
+
 ```bash
-aoe --model=models/onnx-models/vision-encoder.onnx \
-    --framework=5 \
-    --output=models/om-models/vision-encoder-tuned \
-    --job_type=2 \
-    --input_shape="images:1,3,1008,1008" \
-    --insert_op_conf=models/config/vision.cfg
+# 多实例部署：只构建一次共用镜像，镜像内会包含 /app/bin/ascendsam3_vision_bench
+docker-compose -f docker-compose.dual.yml build sam3-npu2
+
+# 暂停 SAM3，避免其他容器 namespace 同时打开同一 Device，并降低竞争干扰。
+# 测试期间网关的检测接口不可用；此命令不停止其他项目的大模型服务。
+docker-compose -f docker-compose.dual.yml stop sam3-npu2 sam3-npu3
 ```
+
+单实例部署改用：
+
+```bash
+docker-compose -f docker-compose.yml build sam3-service
+docker-compose -f docker-compose.yml stop sam3-service
+```
+
+Compose V2 用户把 `docker-compose` 换为 `docker compose`。这些步骤只用于离线实验，日常服务仍直接通过 Compose 启动。
+
+宿主机脚本只需要 Python 3.9+ 标准库和 Docker；CANN/ACL/OpenCV 都在镜像里。脚本从 `.env` 读取 `ASCEND_PHYSICAL_DEVICE_ID`、`SAM3_BENCH_IMAGE`、`CANN_IMAGE`、`SOC_VERSION` 等，优先级为 **命令行 > 调用者环境变量 > .env > 默认值**。`.env` 按字面量解析，不执行 shell 表达式。
+
+工具会检查运行中容器的设备映射；同一 Device 仍被显式映射给运行中容器时拒绝开始。privileged 容器能看到所有设备，默认也拒绝开始；如果大模型容器是 privileged，但经 `npu-smi info` 确认只使用 device 0/1、测试 device 2 确实空闲，可在基准和调优命令追加 `--allow-privileged-peer`，明确确认这一点。该参数不能绕过显式的同 Device 映射检查。也请确认没有宿主机进程使用测试设备，测试期间不要启动其他进程占用它。不要为了测试停止 device 0/1 上无关的大模型。
+
+### 2. 测当前 Vision 基线
+
+确认使用的是已经对齐、当前部署的 OM；不要用旧归一化模型作为基线。
+
+```bash
+python3 scripts/benchmark_vision.py \
+  --device 2 \
+  --baseline models/om-models/vision-encoder-trt.om \
+  --images test-images \
+  --warmup 3 --iterations 10 --repeats 2
+```
+
+遍历 `test-images` 第一层的所有支持图片，逐图预热并测量。可先加 `--max-images 3` 快速验证工具。图片解码、OM 加载、预热、输出回传/比较和写报告不计入 Vision 样本耗时。
+
+JSON 中的时间单位均为毫秒，包含原始样本以及均值/P50/P95/min/max：
+
+| 指标 | 范围 |
+|---|---|
+| `sampling_ms` | CPU 采样，含预处理临时缓冲分配与输入检查 |
+| `upload_ms` | BGR uint8 输入同步 H2D 上传 |
+| `inference_ms` | 同步 `aclmdlExecute` 及当前同步调用，含模型内 AIPP |
+| `total_ms` | 完整 Vision encode，不是 HTTP 接口总时间 |
+
+### 3. 只调优 Vision，保留全部产物
+
+```bash
+python3 scripts/tune_vision.py \
+  --device 2 --soc Ascend310P3 \
+  --output-name vision-encoder-trt-tuned
+
+# 等价的兼容入口：
+# bash scripts/tune_models.sh --device 2 --soc Ascend310P3 \
+#   --output-name vision-encoder-trt-tuned
+```
+
+流程使用 `job_type=2`，读取最新 `models/config/vision.cfg`。容器中先检查可见设备数为 1、初始化逻辑 device 0、用 `aclrtGetSocName` 验证芯片，然后通过 `aoe --device=0` 在线调优。
+
+**不要给 310P 在线调优盲目添加 `--soc_version`**；此参数不是这里用于选择设备的参数。工具中的 `--soc` / `SOC_VERSION` 仅用于校验实际芯片。[AOE 参数说明](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/devaids/aoe/aoepar_16_001.html)、[离线快速调优的 soc_version 限制](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/devaids/aoe/aoepar_16_060.html)。
+
+每次运行在 `benchmark-results/aoe-时间-随机ID/` 保留：
+
+- 完整 `aoe.log`、工具帮助、设备校验记录与准确命令。
+- 通过 `TUNE_BANK_PATH` 保存的知识库 `bank/` 和 AOE 工作目录。
+- 本次生成的 OM、ONNX/AIPP SHA256、镜像名称和输出模型校验信息。
+
+成功后复制候选到 `models/om-models/vision-encoder-trt-tuned.om`，并生成 `.build-info.json`。已有候选不会被默认覆盖或静默跳过；使用新的 `--output-name`，或明确 `--force`。即使 `--force`，也禁止覆盖 `.env`/环境变量 `VISION_MODEL` 当前指向的模型。失败或输出 OM 缺失时不会发布候选，日志仍保留。**候选生成成功不代表速度或精度已经验收。**
+
+### 4. 自动比较基线与候选
+
+```bash
+python3 scripts/benchmark_vision.py \
+  --device 2 \
+  --baseline models/om-models/vision-encoder-trt.om \
+  --candidate models/om-models/vision-encoder-trt-tuned.om \
+  --images test-images \
+  --warmup 3 --iterations 10 --repeats 2
+```
+
+基线/候选在独立进程、独立临时容器中顺序执行，始终只驻留一个 Vision 模型；重复测试交替采用 A→B、B→A 顺序。23 张图片使用以上参数通常需要十几分钟，取决于设备实际速度。
+
+首轮另外比较三路实际被 Decoder 消费的逻辑 FP32 特征，排除 OM 最大容量中的未使用部分；检查输出 dtype/格式/顺序，报告 max absolute error、MAE、RMSE、余弦相似度、非有限值及 allclose 不匹配数量。比较发生在计时结束后，不会把特征 D2H/磁盘读取算进模型推理时间。
+
+默认判断为 `abs(candidate-baseline) <= atol + rtol*abs(baseline)`，`--atol`、`--rtol` 默认均为 `0.001`。比较不通过时仍生成报告，退出码 **2**；运行/输入错误返回 **1**，正常返回 **0**。不要仅为获得 PASS 盲目放宽容差。
+
+每个图片/裁剪样本的基线特征约占 **106.3 MiB** 临时磁盘空间；23 个样本约 **2.39 GiB**，还需额外余量。默认测试结束删除本次临时特征，可加 `--keep-features` 保留；日志和 JSON 总是保留。所有模型、图片、裁剪清单及输出目录须位于项目内，也支持模型路径 `/app/models/...`。工具不会自动修改服务模型。
+
+报告位于 `benchmark-results/vision-时间-随机ID/summary.json`，包含每轮报告、输入/模型 SHA256、全图与裁剪分组统计、总体耗时降幅和特征比较结论。单 Device 串行基准的提速比例不能直接等同于双 Device HTTP 吞吐提升。
+
+### 5. 测实际裁剪路径、采集算子性能
+
+默认只测全图。要覆盖细化检测的真实 ROI，复制并修改示例，把图片路径替换为实际文件，填写服务 `[OmniCrop] roi[...]` 日志中的整数 `x,y,w,h`，不要使用浮点 crop 坐标重新取整：
+
+```bash
+cp examples/vision-crops.json.example vision-crops.json
+# 编辑 vision-crops.json 后，在第 4 步命令末尾追加：
+# --crops vision-crops.json
+```
+
+程序仍从完整原图采样 ROI，保持 TRT 边界行为；越界 ROI 直接报错。清单中的 ROI 会追加到全图样本，报告单独给出 `full`、`crop` 统计。
+
+采集性能数据可运行小样本：
+
+```bash
+python3 scripts/benchmark_vision.py \
+  --device 2 --baseline models/om-models/vision-encoder-trt.om \
+  --images test-images --max-images 1 \
+  --warmup 3 --iterations 10 --repeats 1 --profile
+```
+
+`--profile` 在容器内以 `msprof` 包裹基准程序，输出保存在本次报告目录。分析时只看预热后的 Vision 执行区间；加载、预热以及计时后的特征检查也会出现在采集数据中。**Profiling 有额外开销，不能拿它与未采集的耗时比较。** 镜像缺少 msprof 时会明确失败，不能用 HTTP 客户端的采集结果代替服务进程采集。[CANN 9.0 msprof 说明](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/devaids/Profiling/atlasprofiling_16_0010.html)。
+
+有本机 CANN/OpenCV 开发环境时，也可 `cmake --build build --target ascendsam3_vision_bench`，再给脚本添加 `--local --binary build/ascendsam3_vision_bench`；此模式的 `--device` 是本机逻辑设备编号，由使用者确保没有其他业务占用。
+
+### 6. 验证检测/Mask 后再切换服务
+
+特征 allclose 只是数值回归筛查，**不是人员/安全帽召回或 Mask 精度保证**。需要在同一批代表性图片、相同参数上分别保存原模型与候选模型的接口结果。
+
+先保留 `.env` 中原来的 `VISION_MODEL`，恢复服务：
+
+```bash
+docker-compose -f docker-compose.dual.yml up -d --no-build --force-recreate
+# 等 /health 正常后，直接测 A 后端，避免混入另一模型或网关排队差异。
+python3 scripts/benchmark_service.py \
+  --url http://127.0.0.1:18001/predict-obj-refine/file \
+  --images test-images --mode obj-refine \
+  --pre-detect-label person --class-name helmet \
+  --return-mask --save-results --concurrency 1 --rounds 1 --warmup 1 \
+  --label baseline-mask --json-output benchmark-results/baseline-mask.json
+```
+
+再手动将 `.env` 的 `VISION_MODEL` 改为 `models/om-models/vision-encoder-trt-tuned.om`，用相同 Compose 命令重建容器、等待模型就绪，然后重复接口测试，仅更改标签/输出文件名为 `candidate-mask`。保持阈值、裁剪预算、图片不变，检查框、分数、漏检及解码后的原图坐标 Mask。验收后再按原有双实例并发参数测端到端吞吐/P95；不达标则恢复原 `VISION_MODEL` 并重建容器。单实例部署使用自己的服务端口（默认 18000）及单实例 Compose 文件。
 
 ---
 

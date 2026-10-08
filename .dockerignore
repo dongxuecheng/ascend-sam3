@@ -6,6 +6,8 @@ kernel_meta/
 aoe_workspace/
 models/
 .pytest_cache/
+benchmark-results/
+test-images/
 
 # Python 缓存
 **/__pycache__/

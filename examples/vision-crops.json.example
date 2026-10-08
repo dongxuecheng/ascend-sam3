@@ -1,0 +1,5 @@
+[
+  {"image": "test-images/your-scene.jpg", "roi": [952, 297, 314, 314]},
+  {"image": "test-images/your-scene.jpg", "roi": [1234, 295, 383, 383]},
+  {"image": "test-images/your-scene.jpg", "roi": [267, 255, 194, 194]}
+]

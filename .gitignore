@@ -10,3 +10,4 @@ third_party/tokenizers-cpp/
 __pycache__/
 *.json
 .env
+benchmark-results/

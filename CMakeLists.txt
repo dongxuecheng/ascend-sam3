@@ -181,6 +181,12 @@ target_link_libraries(ascendsam3_demo ascendsam3)
 add_executable(ascendsam3_bench src/bench.cpp)
 target_link_libraries(ascendsam3_bench ascendsam3)
 
+# Standalone Vision benchmark; no tokenizer/Text/Decoder initialization.
+add_executable(ascendsam3_vision_bench
+    src/vision_bench.cpp src/infer/aclmodel.cpp src/infer/modelVision.cpp)
+target_link_libraries(ascendsam3_vision_bench
+    ${CANN_LIBS} -Wl,--start-group ${OpenCV_LIBS} ${OPENCV_3RDPARTY_LIBS} -Wl,--end-group z pthread dl)
+
 # pybind11 Python 绑定
 # 帮助 pybind11 定位当前 Python 解释器，避免多版本/自定义安装路径导致检测失败
 if(NOT DEFINED PYTHON_EXECUTABLE)

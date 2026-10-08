@@ -101,7 +101,7 @@ RUN BUILD_JOBS=$(nproc) && \
           -DSAM3_DEPENDENCIES_ONLY=OFF \
           -DCMAKE_BUILD_TYPE=Release && \
     CARGO_BUILD_JOBS=$BUILD_JOBS \
-    cmake --build /app/build --target ascendsam3_py --parallel $BUILD_JOBS && \
+    cmake --build /app/build --target ascendsam3_py ascendsam3_vision_bench --parallel $BUILD_JOBS && \
     cp /app/build/ascendsam3*.so /app/
 
 # ------------------------------------------------------------------------------
@@ -132,6 +132,7 @@ COPY service/requirements.txt /app/service/requirements.txt
 RUN pip3 install --no-cache-dir -r /app/service/requirements.txt
 COPY service /app/service
 COPY --from=builder /app/ascendsam3*.so /app/
+COPY --from=builder /app/build/ascendsam3_vision_bench /app/bin/ascendsam3_vision_bench
 COPY src/third_party/omnicrop/NOTICE.md /usr/share/doc/ascend-sam3/omnicrop/NOTICE.md
 
 # 暴露 FastAPI 服务端口

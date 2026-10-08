@@ -20,6 +20,14 @@
 class VisionModel : public AclModel
 {
   public:
+    struct Timings
+    {
+        double sampling_ms = 0;
+        double upload_ms = 0;
+        double inference_ms = 0;
+        double total_ms = 0;
+    };
+
     VisionModel() = default;
     ~VisionModel() override = default;
 
@@ -40,11 +48,16 @@ class VisionModel : public AclModel
      */
     void* feature_ptr(size_t idx) const;
 
+    const Timings& last_timings() const { return timings_; }
+    void set_timing_log(bool enabled) { timing_log_ = enabled; }
+
   private:
     aclError encode_impl(const cv::Mat& image, const cv::Rect* crop);
     aclError preprocess_bgr(const cv::Mat& image, const cv::Rect* crop);
     int input_h_ = 1008;
     int input_w_ = 1008;
+    Timings timings_;
+    bool timing_log_ = true;
 };
 
 #endif // MODEL_VISION_HPP__
