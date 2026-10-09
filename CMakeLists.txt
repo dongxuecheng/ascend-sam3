@@ -32,12 +32,6 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src
 )
 
-link_directories(
-    ${ASCEND_HOME}/lib64
-    ${ASCEND_HOME}/lib64/plugin/opskernel
-    ${ASCEND_HOME}/opp/built-in/op_impl/ai_core/tbe/op_api/lib/linux/${CANN_HOST_ARCH}
-)
-
 # OpenCV：必须通过环境变量 OPENCV_INSTALL_DIR 指定，不硬编码默认值
 if(DEFINED ENV{OPENCV_INSTALL_DIR})
     set(OPENCV_CUSTOM_DIR "$ENV{OPENCV_INSTALL_DIR}")
@@ -149,15 +143,7 @@ endif()
 # 当前实现只调用 AscendCL/ACL Runtime API；mask 后处理走 ACL memcpy +
 # OpenCV，不直接调用 aclnn。仅链接实际使用的库，避免 CANN 版本变化时因
 # acl_op_compiler、nnopbase 或拆分后的 aclnn 库名称变化导致构建失败。
-find_library(CANN_ASCENDCL_LIB NAMES ascendcl PATHS ${ASCEND_HOME}/lib64 NO_DEFAULT_PATH)
-find_library(CANN_ACLRT_LIB NAMES runtime acl_rt PATHS ${ASCEND_HOME}/lib64 NO_DEFAULT_PATH)
-if(NOT CANN_ASCENDCL_LIB)
-    message(FATAL_ERROR "Cannot find libascendcl under ${ASCEND_HOME}/lib64")
-endif()
-set(CANN_LIBS ${CANN_ASCENDCL_LIB})
-if(CANN_ACLRT_LIB)
-    list(APPEND CANN_LIBS ${CANN_ACLRT_LIB})
-endif()
+include("${CMAKE_SOURCE_DIR}/cmake/Sam3CannLibraries.cmake")
 
 # 静态库循环依赖时使用 start-group/end-group
 target_link_libraries(ascendsam3
@@ -175,15 +161,18 @@ target_link_libraries(ascendsam3
 
 # 示例可执行程序
 add_executable(ascendsam3_demo src/main.cpp)
+sam3_configure_cann_target(ascendsam3_demo)
 target_link_libraries(ascendsam3_demo ascendsam3)
 
 # 性能测试程序
 add_executable(ascendsam3_bench src/bench.cpp)
+sam3_configure_cann_target(ascendsam3_bench)
 target_link_libraries(ascendsam3_bench ascendsam3)
 
 # Standalone Vision benchmark; no tokenizer/Text/Decoder initialization.
 add_executable(ascendsam3_vision_bench
     src/vision_bench.cpp src/infer/aclmodel.cpp src/infer/modelVision.cpp)
+sam3_configure_cann_target(ascendsam3_vision_bench)
 target_link_libraries(ascendsam3_vision_bench
     ${CANN_LIBS} -Wl,--start-group ${OpenCV_LIBS} ${OPENCV_3RDPARTY_LIBS} -Wl,--end-group z pthread dl)
 
@@ -210,6 +199,7 @@ if(NOT pybind11_FOUND)
 endif()
 
 pybind11_add_module(ascendsam3_py src/python/bindings.cpp)
+sam3_configure_cann_target(ascendsam3_py)
 set_target_properties(ascendsam3_py PROPERTIES OUTPUT_NAME ascendsam3 LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 target_link_libraries(ascendsam3_py PRIVATE
     ascendsam3

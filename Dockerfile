@@ -86,6 +86,7 @@ RUN BUILD_JOBS=$(nproc) && \
 # 复制并编译 src/，因此普通 C++ 改动不再重新下载 crates 或构建 Abseil。
 FROM dependencies AS builder
 
+COPY cmake /app/cmake
 COPY src /app/src
 
 RUN BUILD_JOBS=$(nproc) && \

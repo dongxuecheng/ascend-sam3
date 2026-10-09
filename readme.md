@@ -268,6 +268,10 @@ docker-compose -f docker-compose.yml stop sam3-service
 
 Compose V2 用户把 `docker-compose` 换为 `docker compose`。这些步骤只用于离线实验，日常服务仍直接通过 Compose 启动。
 
+镜像编译时，CMake 优先使用对应架构的 CANN `devlib/linux/aarch64`（x86_64 主机则使用 `devlib/linux/x86_64`），并兼容旧版 `lib64/stub` 布局；链接 `ascendcl` 和存在时的 `acl_rt`，不混入真实 `libruntime.so`。旧构建目录缓存的运行库路径会自动重新选择。编译库目录不会写入 SAM3 可执行程序/Python 扩展的 RPATH，运行时仍由真实 CANN 库及 Compose 挂载的宿主机驱动提供实现。
+
+若构建报 `libascend_hal.so ... not found` / `undefined reference to drv...`，先确认已同步本次修复的 `CMakeLists.txt`、`cmake/` 和 `Dockerfile`，再正常执行 `docker compose build sam3-service`（多实例为 `docker compose -f docker-compose.dual.yml build sam3-npu2`）。不要把 simulator 的库用于链接，也不要将 `devlib`/`stub` 加到运行时 `LD_LIBRARY_PATH`。若工具链本身缺少开发库，会在 CMake 配置时明确报错，不会悄悄退回真实运行库。此次修改 CMakeLists 会使依赖层缓存失效一次；完成后只改 `cmake/` 的选库逻辑不会使 tokenizer/Abseil 依赖层失效，无需清理缓存或 `--no-cache`。
+
 宿主机脚本只需要 Python 3.9+ 标准库和 Docker；CANN/ACL/OpenCV 都在镜像里。脚本从 `.env` 读取 `ASCEND_PHYSICAL_DEVICE_ID`、`SAM3_BENCH_IMAGE`、`CANN_IMAGE`、`SOC_VERSION` 等，优先级为 **命令行 > 调用者环境变量 > .env > 默认值**。`.env` 按字面量解析，不执行 shell 表达式。
 
 工具会检查运行中容器的设备映射；同一 Device 仍被显式映射给运行中容器时拒绝开始。privileged 容器能看到所有设备，默认也拒绝开始；如果大模型容器是 privileged，但经 `npu-smi info` 确认只使用 device 0/1、测试 device 2 确实空闲，可在基准和调优命令追加 `--allow-privileged-peer`，明确确认这一点。该参数不能绕过显式的同 Device 映射检查。也请确认没有宿主机进程使用测试设备，测试期间不要启动其他进程占用它。不要为了测试停止 device 0/1 上无关的大模型。
