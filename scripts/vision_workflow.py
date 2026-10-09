@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+CONTAINER_WORKSPACE = "/workspace"
 DEFAULT_CANN = "swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-310p-ubuntu22.04-py3.11"
 
 
@@ -39,8 +40,12 @@ def settings(root: Path = ROOT) -> dict[str, str]:
 
 
 def workspace_path(value: str | Path, root: Path = ROOT) -> Path:
-    if str(value).startswith("/app/"):
-        value = str(value)[5:]  # Accept service .env's container-absolute model path.
+    # Keep accepting service .env paths under /app, but experimental containers
+    # mount project data elsewhere so the image's /app/bin stays visible.
+    for prefix in (CONTAINER_WORKSPACE + "/", "/app/"):
+        if str(value).startswith(prefix):
+            value = str(value)[len(prefix):]
+            break
     path = Path(value)
     path = (root / path).resolve() if not path.is_absolute() else path.resolve()
     path.relative_to(root.resolve())  # Docker only mounts the project; reject escaping symlinks.
@@ -50,7 +55,7 @@ def workspace_path(value: str | Path, root: Path = ROOT) -> Path:
 
 
 def container_path(path: Path, root: Path = ROOT) -> str:
-    return "/app/" + path.resolve().relative_to(root.resolve()).as_posix()
+    return CONTAINER_WORKSPACE + "/" + path.resolve().relative_to(root.resolve()).as_posix()
 
 
 def digest(path: Path) -> str:
@@ -120,8 +125,8 @@ def docker_args(device: int, image: str, entrypoint: str, root: Path = ROOT,
     driver = Path("/usr/local/Ascend/driver")
     if not driver.is_dir():
         raise FileNotFoundError(f"Driver directory missing: {driver}")
-    args = [docker, "run", "--rm", "--ipc=host", "-w", "/app",
-            "-e", "ASCEND_DEVICE_ID=0", "-v", f"{root.resolve()}:/app",
+    args = [docker, "run", "--rm", "--ipc=host", "-w", CONTAINER_WORKSPACE,
+            "-e", "ASCEND_DEVICE_ID=0", "-v", f"{root.resolve()}:{CONTAINER_WORKSPACE}",
             "-v", f"{driver}:{driver}:ro"]
     for node in nodes:
         args.extend(["--device", f"{node}:{node}"])

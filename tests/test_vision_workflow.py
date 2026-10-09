@@ -34,10 +34,22 @@ class WorkflowTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.assertEqual(workflow.workspace_path("/app/models/a.om", root), root / "models/a.om")
-            self.assertEqual(workflow.container_path(root / "space dir/a.om", root), "/app/space dir/a.om")
-            for value in ("../escape", "bad\nname"):
+            self.assertEqual(workflow.workspace_path("/workspace/models/a.om", root), root / "models/a.om")
+            self.assertEqual(workflow.container_path(root / "space dir/a.om", root), "/workspace/space dir/a.om")
+            for value in ("../escape", "/app/../escape", "/workspace/../escape", "bad\nname"):
                 with self.assertRaises(ValueError):
                     workflow.workspace_path(value, root)
+
+    def test_docker_mount_preserves_image_app_directory(self):
+        with patch.object(workflow.Path, "exists", return_value=True), \
+             patch.object(workflow.Path, "is_dir", return_value=True):
+            command = workflow.docker_args(2, "service:latest", "/usr/bin/env")
+        mounts = [command[i + 1] for i, item in enumerate(command) if item == "-v"]
+        self.assertIn(f"{ROOT.resolve()}:/workspace", mounts)
+        self.assertFalse(any(item.endswith(":/app") or item.endswith(":/app:ro") for item in mounts))
+        self.assertEqual(command[command.index("-w") + 1], "/workspace")
+        self.assertIn("/dev/davinci2:/dev/davinci2", command)
+        self.assertNotIn("--privileged", command)
 
     def test_idle_guard_targets_device_not_other_devices(self):
         containers = [{"Name": "/llm", "HostConfig": {"Devices": [{"PathOnHost": "/dev/davinci0"}]}},
@@ -104,7 +116,7 @@ class BenchmarkTest(unittest.TestCase):
             atol=.001, rtol=.001, output_dir="benchmark-results", keep_features=False, profile=False,
             local=True, binary="fake-bench")
 
-    def run_fake(self, passed=True):
+    def run_fake(self, passed=True, local=True):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "models").mkdir()
@@ -114,26 +126,54 @@ class BenchmarkTest(unittest.TestCase):
             (root / "test-images").mkdir()
             (root / "test-images/one.jpg").write_bytes(b"image")
             calls = []
+            def host_path(value):
+                return Path(value) if local else workflow.workspace_path(value, root)
             def fake_run(command, log, accepted):
                 calls.append(command)
-                output = Path(command[command.index("--json-output")+1])
+                output = host_path(command[command.index("--json-output")+1])
+                if not local:
+                    self.assertIn(f"{root.resolve()}:/workspace", command)
+                    self.assertNotIn(f"{root.resolve()}:/app", command)
+                    self.assertIn("/app/bin/ascendsam3_vision_bench", command)
+                    self.assertFalse((root / "bin/ascendsam3_vision_bench").exists())
+                    self.assertTrue(command[command.index("--model")+1].startswith("/workspace/models/"))
+                manifest = host_path(command[command.index("--manifest")+1])
+                image = str(root / "test-images/one.jpg") if local else "/workspace/test-images/one.jpg"
+                self.assertEqual(manifest.read_text(encoding="utf-8").strip(), image)
                 label = output.stem.split("-")[0]
                 compare = "--reference-dir" in command
                 has_dump = "--features-dir" in command
                 features = [{"index": i, "passed": passed if compare else True} for i in range(3)]
                 data = {"schema_version": 1, "soc": "Ascend310P3", "comparison_enabled": compare,
-                        "features_passed": passed if compare else True, "cases": [{"image": str(root / "test-images/one.jpg"),
+                        "features_passed": passed if compare else True, "cases": [{"image": image,
                             "roi": None, "samples": [[1, 2, 100 if label == "baseline" else 80, 103]]*2,
                             "features": features}]}
                 workflow.write_json(output, data)
                 if has_dump:
-                    Path(command[command.index("--features-dir")+1], "0-fpn0.f32").write_bytes(b"reference")
+                    (host_path(command[command.index("--features-dir")+1]) / "0-fpn0.f32").write_bytes(b"reference")
                 if compare:
-                    self.assertTrue(Path(command[command.index("--reference-dir")+1], "0-fpn0.f32").exists())
+                    self.assertTrue((host_path(command[command.index("--reference-dir")+1]) / "0-fpn0.f32").exists())
                 return 0 if not compare or passed else 2
+            args = self.args()
+            args.local = local
             with patch.object(bench, "workspace_path", side_effect=lambda p, *_: workflow.workspace_path(p, root)), \
+                 patch.object(bench, "container_path", side_effect=lambda p: workflow.container_path(p, root)), \
+                 patch.object(bench, "docker_args", side_effect=lambda *a: workflow.docker_args(*a, root=root)), \
+                 patch.object(bench, "ensure_idle"), \
+                 patch.object(bench, "image_identity", return_value={"id": "fake-image"}), \
                  patch.object(bench, "logged_run", side_effect=fake_run), contextlib.redirect_stdout(io.StringIO()):
-                status = bench.run(self.args())
+                # Docker command construction needs host NPU paths; only mock
+                # those checks, not actual fixture file existence.
+                with contextlib.ExitStack() as checks:
+                    if not local:
+                        original_exists, original_is_dir = Path.exists, Path.is_dir
+                        def device_exists(path):
+                            return path.as_posix().startswith("/dev/") or original_exists(path)
+                        def driver_is_dir(path):
+                            return path.as_posix() == "/usr/local/Ascend/driver" or original_is_dir(path)
+                        checks.enter_context(patch.object(workflow.Path, "exists", device_exists))
+                        checks.enter_context(patch.object(workflow.Path, "is_dir", driver_is_dir))
+                    status = bench.run(args)
             reports = list((root / "benchmark-results").glob("vision-*/summary.json"))
             result = json.loads(reports[0].read_text(encoding="utf-8"))
             self.assertEqual([Path(c[c.index("--json-output")+1]).stem for c in calls],
@@ -150,6 +190,12 @@ class BenchmarkTest(unittest.TestCase):
 
     def test_failed_comparison_retains_report_returns_two(self):
         self.assertEqual(self.run_fake(False), 2)
+
+    def test_container_processes_use_workspace_paths_without_shadowing_binary(self):
+        self.assertEqual(self.run_fake(local=False), 0)
+
+    def test_container_failed_comparison_retains_report_returns_two(self):
+        self.assertEqual(self.run_fake(False, local=False), 2)
 
 
 class TuningTest(unittest.TestCase):
@@ -237,7 +283,11 @@ class TuningTest(unittest.TestCase):
         aoe = command[command.index("aoe"):]
         self.assertIn("--device=0", aoe)
         self.assertIn("--job_type=2", aoe)
-        self.assertIn("--insert_op_conf=/app/models/config/vision.cfg", aoe)
+        self.assertIn("--insert_op_conf=/workspace/models/config/vision.cfg", aoe)
+        self.assertIn("--model=/workspace/models/onnx-models/vision-encoder.onnx", aoe)
+        self.assertIn("--output=/workspace/benchmark-results/aoe/vision-trt-tuned", aoe)
+        self.assertIn("/workspace/benchmark-results/aoe", command)
+        self.assertIn("/workspace/benchmark-results/aoe/bank", command)
         self.assertFalse(any("--soc_version" in item for item in aoe))
         self.assertFalse(any("decoder" in item for item in aoe))
         compile(tune.PREFLIGHT, "preflight", "exec")

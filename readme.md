@@ -274,6 +274,8 @@ Compose V2 用户把 `docker-compose` 换为 `docker compose`。这些步骤只�
 
 宿主机脚本只需要 Python 3.9+ 标准库和 Docker；CANN/ACL/OpenCV 都在镜像里。脚本从 `.env` 读取 `ASCEND_PHYSICAL_DEVICE_ID`、`SAM3_BENCH_IMAGE`、`CANN_IMAGE`、`SOC_VERSION` 等，优先级为 **命令行 > 调用者环境变量 > .env > 默认值**。`.env` 按字面量解析，不执行 shell 表达式。
 
+基准和 AOE 实验容器将项目目录挂载到 `/workspace`，模型、图片、清单、特征和报告统一使用该目录；基准程序仍运行镜像自带的 `/app/bin/ascendsam3_vision_bench`。不要将整个项目挂载到 `/app`，否则会遮住镜像中的程序并报 `No such file or directory`。修复旧脚本时同步 `scripts/vision_workflow.py` 即可；镜像已包含基准程序的情况下无需重建镜像、重转模型或修改 Compose 配置。
+
 工具会检查运行中容器的设备映射；同一 Device 仍被显式映射给运行中容器时拒绝开始。privileged 容器能看到所有设备，默认也拒绝开始；如果大模型容器是 privileged，但经 `npu-smi info` 确认只使用 device 0/1、测试 device 2 确实空闲，可在基准和调优命令追加 `--allow-privileged-peer`，明确确认这一点。该参数不能绕过显式的同 Device 映射检查。也请确认没有宿主机进程使用测试设备，测试期间不要启动其他进程占用它。不要为了测试停止 device 0/1 上无关的大模型。
 
 ### 2. 测当前 Vision 基线
@@ -340,7 +342,7 @@ python3 scripts/benchmark_vision.py \
 
 默认判断为 `abs(candidate-baseline) <= atol + rtol*abs(baseline)`，`--atol`、`--rtol` 默认均为 `0.001`。比较不通过时仍生成报告，退出码 **2**；运行/输入错误返回 **1**，正常返回 **0**。不要仅为获得 PASS 盲目放宽容差。
 
-每个图片/裁剪样本的基线特征约占 **106.3 MiB** 临时磁盘空间；23 个样本约 **2.39 GiB**，还需额外余量。默认测试结束删除本次临时特征，可加 `--keep-features` 保留；日志和 JSON 总是保留。所有模型、图片、裁剪清单及输出目录须位于项目内，也支持模型路径 `/app/models/...`。工具不会自动修改服务模型。
+每个图片/裁剪样本的基线特征约占 **106.3 MiB** 临时磁盘空间；23 个样本约 **2.39 GiB**，还需额外余量。默认测试结束删除本次临时特征，可加 `--keep-features` 保留；日志和 JSON 总是保留。所有模型、图片、裁剪清单及输出目录须位于项目内，也支持模型路径 `/workspace/models/...`，并兼容服务配置中的 `/app/models/...`（工具会自动转换为实验容器路径）。工具不会自动修改服务模型。
 
 报告位于 `benchmark-results/vision-时间-随机ID/summary.json`，包含每轮报告、输入/模型 SHA256、全图与裁剪分组统计、总体耗时降幅和特征比较结论。单 Device 串行基准的提速比例不能直接等同于双 Device HTTP 吞吐提升。
 

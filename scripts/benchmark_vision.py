@@ -130,6 +130,7 @@ def parse_args() -> argparse.Namespace:
 def native_command(args: argparse.Namespace, model: Path, manifest: Path, report: Path,
                    features: Path | None = None, reference: Path | None = None) -> list[str]:
     translate = str if args.local else container_path
+    # This executable belongs to the image; project data is mounted at /workspace.
     binary = str(workspace_path(args.binary)) if args.local else "/app/bin/ascendsam3_vision_bench"
     command = [binary, "--model", translate(model), "--manifest", translate(manifest),
                "--json-output", translate(report), "--device", str(args.device if args.local else 0),
